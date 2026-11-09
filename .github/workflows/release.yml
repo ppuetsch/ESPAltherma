@@ -1,0 +1,65 @@
+name: Release
+
+# On a version tag: builds the firmwares of the web installer, attaches them to a GitHub release, and publishes
+# the installer (flasher/ with its firmwares) on Cloudflare Pages: https://espaltherma.pages.dev
+# GitHub Pages is left to main.
+# A tag with a suffix (v2.0.0-beta.1) makes a pre-release, never shown as the repository's latest release.
+# The firmwares must be served by the installer's own site: ESP Web Tools downloads them with fetch(), and
+# release assets are not served with CORS headers.
+# Repository secrets: CLOUDFLARE_API_TOKEN (permission Cloudflare Pages: Edit) and CLOUDFLARE_ACCOUNT_ID.
+# Run by hand (workflow_dispatch), it publishes a preview at https://preview.espaltherma.pages.dev instead. A tag
+# publishes the preview too, so the development builds of the web update are never older than the latest release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: installer
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-release-2-${{ hashFiles('platformio.ini') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install platformio intelhex # intelhex: the esptool the C6 platform ships imports it
+      - name: Label catalog up to date with definitions/
+        run: python scripts/gen_catalog.py --check
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"; else echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"; fi
+      - name: Build the installer firmwares
+        run: python scripts/build_flasher.py --build --version "${{ steps.version.outputs.version }}"
+      - name: Attach the firmwares to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: flasher/firmware/*.bin
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
+      - name: Publish the installer on Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy flasher --project-name espaltherma --branch ${{ startsWith(github.ref, 'refs/tags/') && 'main' || 'preview' }} --commit-dirty=true
+      - name: Publish the same installer as the preview (on a tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy flasher --project-name espaltherma --branch preview --commit-dirty=true

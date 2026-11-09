@@ -4,16 +4,27 @@ char buff[64];
 class Converter
 {
 public:
-    int RType = 802; // refrigerant for pressure->temp: 801=R410A, 802=R32, 803=R22
+    int RType = 802; // refrigerant for pressure->temp: 801=R410A, 802=R32, 803=R22, 804=R744, 805=R134a
+    bool quiet = false; // no conversion trace on Serial (one-off decodes for the web interface)
+
+    // Active labels: the values selected for this installation
+    LabelDef *activeLabels = nullptr;
+    size_t activeCount = 0;
+
+    void setLabels(LabelDef *labels, size_t count)
+    {
+        activeLabels = labels;
+        activeCount = count;
+    }
 
     void getLabels(char registryID, LabelDef *ret[], int &num)
     {
         num = 0;
-        for (auto &&label : labelDefs)
+        for (size_t i = 0; i < activeCount; i++)
         {
-            if (label.registryID == registryID)
+            if (activeLabels[i].registryID == registryID)
             {
-                ret[num++] = &label;
+                ret[num++] = &activeLabels[i];
             }
         }
     }
@@ -53,9 +64,18 @@ public:
     double press2tempR22(double d){
         return -5.0232146925414E-06*d*d*d*d*d*d + 0.000475561916201275*d*d*d*d*d - 0.0175087997648461*d*d*d*d + 0.318620413943417*d*d*d - 3.0844373741869*d*d + 19.0217687284902*d - 42.3282361912494;
     }
-    double convertPress2Temp(double data){// R32 default; R410A/R22 selected via RType (conv 800-803)
+    double press2tempR744(double d){
+        return -1.0602828001772E-10*d*d*d*d*d*d + 4.48029033022151E-08*d*d*d*d*d - 8.87954524680462E-06*d*d*d*d + 0.00106272045700814*d*d*d - 0.0783403045879055*d*d + 3.82721150267446*d - 69.9353653715338;
+    }
+    // R134a (code 805, the second stage of the Altherma HT hydrobox, issue #95)
+    double press2tempR134a(double d){
+        return -1.04905819974313E-06*d*d*d*d*d*d + 0.000127541586259339*d*d*d*d*d - 0.00608728787767479*d*d*d*d + 0.145722092658689*d*d*d - 1.89890628883685*d*d + 16.0983790129582*d - 25.7334135825739;
+    }
+    double convertPress2Temp(double data){// R32 default; R410A/R22/R744/R134a selected via RType (conv 800-805)
         if (RType == 801) return press2tempR410A(data);
         if (RType == 803) return press2tempR22(data);
+        if (RType == 804) return press2tempR744(data);
+        if (RType == 805) return press2tempR134a(data);
         	double num = -2.6989493795556E-07 * data * data * data * data * data * data;
 			double num2 = 4.26383417104661E-05 * data * data * data * data * data;
 			double num3 = -0.00262978346547749 * data * data * data * data;
@@ -74,10 +94,13 @@ public:
         int convId = def->convid;
         int num = def->dataSize;
         double dblData = NAN;
-        Serial.print("Converting from:");
-        for (int i = 0; i < num; i++)
+        if (!quiet)
         {
-            Serial.printf(" 0x%02x ", data[i]);
+            Serial.print("Converting from:");
+            for (int i = 0; i < num; i++)
+            {
+                Serial.printf(" 0x%02x ", data[i]);
+            }
         }
 
         switch (convId)
@@ -176,10 +199,8 @@ public:
                 strcat(def->asString, "---");
                 return;
             }
-            unsigned short num3 = (unsigned short)((int)data[1] * 256);
-            num3 |= (unsigned short)(data[0] & 127);
-            dblData = (double)((num3 & 65280) / 256);
-            dblData += (double)(num3 & 255) / 256.0;
+            // Signed (#543): read as unsigned, a heat exchanger at -6° showed 250°
+            dblData = (double)getSignedValue(data, num, 0) / 256.0;
             break;
         }
         case 151:
@@ -276,6 +297,8 @@ public:
 		}
 
         case 201:
+            convertTable201(data, def->asString);
+            return;
         case 217:
             convertTable217(data, def->asString);
             return;
@@ -341,6 +364,12 @@ public:
             return;
         }
 
+        case 218:
+            convertTable218(getUnsignedValue(data, num, 1), def->asString);
+            return;
+        case 313:
+            convertTable313(data, def->asString);
+            return;
         case 219:
         {
             // capacity (kW class) code lookup
@@ -408,13 +437,22 @@ public:
             RType = 802; strcat(def->asString, "R32");   return;
         case 803:
             RType = 803; strcat(def->asString, "R22");   return;
+        case 804:
+            RType = 804; strcat(def->asString, "R744");  return;
+        case 805:
+            RType = 805; strcat(def->asString, "R134a"); return;
 
-        // enum-state convs not present; the def label
-        // enumerates the integer states, so expose the raw value
-        case 317:
-        case 323:
-        case 336:
-            dblData = (double)data[0];
+        // Enumerated states packed with single-bit flags in the same byte (the flags are bits 0..4 of
+        // 0x62/8 and bits 2..5 of 0x63/12). The pump feedback layout was measured on an EPRA08EAW1 (#621).
+        // 317-323 are the 2-bit fields at bits 0..7, 331-336 the 3-bit fields at bits 0..7.
+        case 317: // RT control state, bits 1..0
+            dblData = (double)(data[0] & 0x03);
+            break;
+        case 323: // tank state, bits 7..6
+            dblData = (double)((data[0] >> 6) & 0x03);
+            break;
+        case 336: // pump PWM feedback, bits 7..5
+            dblData = (double)((data[0] >> 5) & 0x07);
             break;
 
         default:
@@ -426,13 +464,15 @@ public:
         {
             sprintf(def->asString, "%g", dblData);
         }
-        Serial.printf("-> %s\n", def->asString);
+        if (!quiet)
+            Serial.printf("-> %s\n", def->asString);
     }
 
 private:
     void convertTable300(unsigned char *data, int tableID, char *ret)
     {
-        Serial.printf("Bin Conv %02x with tableID %d \n", data[0], tableID);
+        if (!quiet)
+            Serial.printf("Bin Conv %02x with tableID %d \n", data[0], tableID);
         char b = 1;
         b = (char)(b << tableID % 10);
         if ((data[0] & b) > 0)
@@ -554,28 +594,63 @@ private:
         }
     }
     // 201
-    void convertTable217(unsigned char *data, char *ret)
+    // Operation modes: 201 and 217 share the list, with "Auto Heat" and "Auto Cool" the other way round
+    void convertTable217(unsigned char *data, char *ret, bool table201 = false)
     {
-        char r217[][30] = {"Fan Only",
-                           "Heating",
-                           "Cooling",
-                           "Auto",
-                           "Ventilation",
-                           "Auto Cool",
-                           "Auto Heat",
-                           "Dry",
-                           "Aux.",
-                           "Cooling Storage",
-                           "Heating Storage",
-                           "UseStrdThrm(cl)1",
-                           "UseStrdThrm(cl)2",
-                           "UseStrdThrm(cl)3",
-                           "UseStrdThrm(cl)4",
-                           "UseStrdThrm(ht)1",
-                           "UseStrdThrm(ht)2",
-                           "UseStrdThrm(ht)3",
-                           "UseStrdThrm(ht)4"};
-        sprintf(ret, r217[(int)data[0]]);
+        static const char *modes[] = {"Fan Only", "Heating", "Cooling", "Auto", "Ventilation", "Auto Cool", "Auto Heat", "Dry", "Aux.",
+                                      "Cooling Storage", "Heating Storage", "UseStrdThrm(cl)1", "UseStrdThrm(cl)2", "UseStrdThrm(cl)3",
+                                      "UseStrdThrm(cl)4", "UseStrdThrm(ht)1", "UseStrdThrm(ht)2", "UseStrdThrm(ht)3", "UseStrdThrm(ht)4"};
+        int v = data[0];
+        if (table201 && (v == 5 || v == 6))
+            v = 11 - v;
+        strcat(ret, v >= 0 && v < 19 ? modes[v] : "Aux.");
+    }
+    void convertTable201(unsigned char *data, char *ret) { convertTable217(data, ret, true); }
+
+    // Operation control mode of a refrigerant stage (Altherma HT hydrobox); HR = heat recovery
+    void convertTable218(unsigned v, char *ret)
+    {
+        static const char *const r218[] = {
+            "Stop control",
+            "Restart stand by",
+            "Before startup control",
+            "Cool startup control",
+            "Cool normal control",
+            "Cool before oil return",
+            "Cool oil return",
+            "Cool after oil return",
+            "Cool pump down residual",
+            "HR startup control",
+            "HR normal control",
+            "HR before oil return",
+            "HR oil return",
+            "HR after oil return",
+            "HR before defrost",
+            "HR defrost",
+            "HR after defrost",
+            "HR pump down residual",
+            "Heat startup control",
+            "Heat fixed control",
+            "Heat before oil return",
+            "Heat oil return",
+            "Heat after oil return",
+            "Heat before defrost",
+            "Heat defrost",
+            "Heat after defrost",
+            "Heat pump down residual",
+            "Mode switch (cool to heat)",
+            "Mode switch (heat to cool)",
+            "Rotation control",
+            "4 way valve initial control"};
+        snprintf(ret, sizeof(LabelDef::asString), "%s", v < sizeof(r218) / sizeof(r218[0]) ? r218[v] : "???");
+    }
+
+    // Indoor unit operation mode, high nibble
+    void convertTable313(unsigned char *data, char *ret)
+    {
+        static const char *const r313[] = {"Fan Only", "Heating", "Cooling", "Auto", "Ventilation", "Auto Heat", "Auto Cool", "Dry", "Aux."};
+        unsigned v = data[0] >> 4;
+        snprintf(ret, sizeof(LabelDef::asString), "%s", v < 8 ? r313[v] : "Aux.");
     }
 
     unsigned short getUnsignedValue(unsigned char *data, int dataSize, int cnvflg)

@@ -1,0 +1,377 @@
+"""Serves web/index.html with a fake device API, to work on the web interface without an ESP.
+
+    python scripts/webui_mock.py [--port 8080] [--fresh]
+
+--fresh starts like a device right after flashing (no WiFi, no MQTT, no model).
+The responses mirror include/webserver.h; values change every few seconds.
+"""
+
+import argparse
+import json
+import math
+import os
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+LIMIT_ON = False  # --limit: the power limit option on
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import webpage  # noqa: E402  (the page with its translations)
+
+MODELS = [
+    ("Altherma(ERGA E EHV-EHB-EHVZ E_EJ series 04-08kW)", "G", "I"),
+    ("Altherma(ERGA E EHSH-X P30-50 E_EF series 04-08kW-ECH2O)", "G", "I"),
+    ("Altherma(EBLA-EDLA D series 4-8kW Monobloc)", "G", "I"),
+    ("Altherma(LT_CA_CB_04-08kW)", "L", "I"),
+    ("Altherma(Hybrid)", "L", "I"),
+    ("PROTOCOL_S", "S", "S"),
+    ("PROTOCOL_S_ROTEX", "R", "S"),
+]
+CATALOG = [
+    (0x10, 0, 217, "Operation Mode", True),
+    (0x10, 1, 304, "Defrost Operation", True),
+    (0x20, 0, 105, "R1T-Outdoor air temp.", True),
+    (0x21, 0, 105, "INV primary current (A)", True),
+    (0x30, 0, 152, "INV frequency (rps)", True),
+    (0x61, 2, 105, "Leaving water temp. before BUH (R1T)", True),
+    (0x61, 4, 105, "Leaving water temp. after BUH (R2T)", True),
+    (0x61, 8, 105, "Inlet water temp.(R4T)", True),
+    (0x61, 10, 105, "DHW tank temp. (R5T)", True),
+    (0x62, 12, 105, "Flow sensor (l/min)", True),
+    (0x62, 14, 105, "Water pressure", True),
+    (0x60, 7, 105, "DHW setpoint", True),
+    (0x60, 9, 105, "LW setpoint (main)", True),
+    (0x62, 3, 105, "LW setpoint (add)", "bizone"),
+    (0x64, 10, 118, "Mixed water temp.", "bizone"),
+    (0x64, 9, 301, "Main pump", "bizone"),
+    (0x64, 9, 302, "Add pump", "bizone"),
+    (0x61, 6, 105, "Refrig. Temp. liquid side (R3T)", True),
+    (0x61, 12, 105, "Indoor ambient temp. (R1T)", True),
+    (0x62, 5, 105, "RT setpoint", True),
+    (0x20, 2, 105, "Discharge pipe temp.", False),
+    (0x20, 4, 105, "Heat exchanger mid-temp.", False),
+    (0x62, 0, 307, "Not in use", False),
+    (0x63, 2, 215, "I/U EEPROM (3rd digit)", False),
+]
+
+
+# Readings of a heat pump heating a house on a mild day: (typical value, drift)
+READINGS = {
+    "R1T-Outdoor air temp.": (6.5, 0.3), "INV primary current (A)": (4.8, 0.3), "INV frequency (rps)": (42, 2),
+    "Leaving water temp. before BUH (R1T)": (34.6, 0.3), "Leaving water temp. after BUH (R2T)": (34.8, 0.3),
+    "Inlet water temp.(R4T)": (30.2, 0.3), "DHW tank temp. (R5T)": (47.6, 0.2), "Flow sensor (l/min)": (16.4, 0.4),
+    "Water pressure": (1.7, 0.02), "DHW setpoint": (48, 0), "LW setpoint (main)": (35, 0), "LW setpoint (add)": (35, 0), "Mixed water temp.": (29.6, 0.3),
+    "Refrig. Temp. liquid side (R3T)": (36.2, 0.4), "Indoor ambient temp. (R1T)": (21.3, 0.1), "RT setpoint": (21, 0), "Discharge pipe temp.": (68, 1), "Heat exchanger mid-temp.": (33.1, 0.5),
+}
+
+
+def key(reg, off, conv, size=2):
+    return reg << 24 | off << 16 | (conv & 0x3FF) << 4 | size
+
+
+class Device:
+    def __init__(self, fresh, ethernet=False, bizone=False, leave_out=()):
+        self.start = time.time()
+        self.ethernet = ethernet
+        self.bizone = bizone  # a two-zone unit: its mixed zone values are selected too
+        self.leave_out = set(leave_out)  # labels not selected: a unit without a hot water tank or room thermostat
+        self.lock = threading.Lock()
+        self.config = {
+            "wifi": {"ssid": "" if fresh else "HomeWiFi", "has_pwd": not fresh, "static": False, "ip": "", "gateway": "", "subnet": "", "dns1": "", "dns2": ""},
+            "hostname": "ESPAltherma",
+            "mqtt": {"server": "" if fresh else "192.168.1.10", "port": 1883, "user": "", "tls": False, "client_id": "ESPAltherma-dev", "base_topic": "espaltherma", "has_pwd": False},
+            "hp": {"protocol": "I", "frequency": 30000, "rx": 16, "tx": 17, "model": "" if fresh else MODELS[0][0], "confirmed": False, "detected_key": "", "labels": []},
+            "relays": {"therm_pin": -1, "therm_high": True, "sg1_pin": -1, "sg2_pin": -1, "sg_high": True, "safety_pin": -1, "safety_high": True},
+            "output": {"one_topic": False, "one_topic_prefix": "espaltherma/OneATTR/", "json_table": False, "binary_num": False, "no_log": False, "debug_serial": False},
+            "control": {"dhw_target": False, "lwt_target": False, "power_limit": LIMIT_ON},
+            "stats": {"enabled": True, "voltage": 230, "phases": 1, "aux_w": 0, "tz": 60},
+            "admin": {"has_pwd": False},
+            "telemetry": {"enabled": False, "install_id": "3f2a9c1be07d4411"},
+        }
+        self.survey_until = time.time() + 6
+        # target controls: the hot water curve (capped by the heat pump's own maximum) and the leaving water curve
+        self.limit = {"limit": 20.0, "active": 0.0, "enable": 0, "on": False, "value": -1, "pending": None, "applied_at": 0}
+        self.ctl = {"dhw": {"target": 48, "target_lo": 52, "saved": -1, "pending": -1, "applied_at": 0, "min": 45, "max": 55, "ceiling": 51},
+                    "lwt": {"target": 36, "target_lo": 40, "saved": -1, "pending": -1, "applied_at": 0, "min": 29, "max": 45, "ceiling": -1}}
+        self.discover_until = 0
+        self.mqtt_test_until = 0
+        self.log = "ESPAltherma mock started\n"
+
+    def status(self):
+        c = self.config
+        wifi_ok = bool(c["wifi"]["ssid"]) and not self.ethernet  # Ethernet boards keep the WiFi as a standby
+        link = "ethernet" if self.ethernet else "wifi" if wifi_ok else "none"
+        st = {
+            "fw": "2.0.0-mock", "board": "wt32-eth01" if self.ethernet else "esp32", "uptime": int(time.time() - self.start),
+            "heap": 182000, "heap_min": 151000, "hostname": c["hostname"],
+            "net": {"link": link, "ip": "192.168.1.43" if self.ethernet else "192.168.1.42" if wifi_ok else "0.0.0.0"},
+            "wifi": {"ssid": c["wifi"]["ssid"], "connected": wifi_ok, "ip": "192.168.1.42" if wifi_ok else "0.0.0.0", "rssi": -58,
+                     "bssid": "80:3F:5D:67:A1:91" if wifi_ok else "", "channel": 12 if wifi_ok else 0, "last_disconnect": "",
+                     "ap": link == "none", "ap_ssid": "ESPAltherma-1A2B", "ap_ip": "192.168.4.1"},
+            "mqtt": {"configured": bool(c["mqtt"]["server"]), "connected": bool(c["mqtt"]["server"]) and link != "none", "server": c["mqtt"]["server"], "state": 0},
+            "hp": {"protocol": c["hp"]["protocol"], "model": c["hp"]["model"], "confirmed": c["hp"]["confirmed"],
+                   "values": len(self.values()), "last_poll": 12 if c["hp"]["model"] else -1,
+                   "survey_running": time.time() < self.survey_until, "survey_done": time.time() >= self.survey_until},
+            "detect": {"model": MODELS[0][0], "family": "G", "confidence": "low"},
+            "telemetry_available": True,
+            "reset_reason": "restart by the firmware", "restart_cause": "Settings changed from the web interface",
+        }
+        if self.ethernet:
+            st["eth"] = {"up": True, "ip": "192.168.1.43", "mac": "A8:03:2A:11:22:33", "speed": 100, "full_duplex": True}
+        ctl = {}
+        for k in ("dhw", "lwt"):
+            if not c["control"].get(k + "_target"):
+                continue
+            d = self.ctl[k]
+            if d["pending"] >= 0 and time.time() - d["applied_at"] > 2:  # the heat pump task applied it
+                d["target"] = d["target_lo"] = d["pending"]
+                d["pending"] = -1
+            if d["saved"] != d["target"] and d["pending"] < 0 and time.time() - d["applied_at"] > 30:
+                d["saved"] = d["target"]
+            # what the thermostat aims for: the curve (interpolated here at a mild outdoor temperature) or the ceiling
+            curve = round((d["target"] + d["target_lo"]) / 2) if d["target"] != d["target_lo"] else d["target"]
+            effective = min(curve, d["ceiling"]) if d["ceiling"] >= 0 else curve
+            ctl[k] = {"status": "ready", "id": "18002904", "min": d["min"], "max": d["max"], "target": d["target"], "target_lo": d["target_lo"],
+                      "effective": effective, "ceiling": d["ceiling"], "saved": d["saved"], "pending": d["pending"]}
+        if c["control"].get("power_limit"):
+            l = self.limit
+            if l["pending"] is not None and time.time() - l["applied_at"] > 2:
+                if l["pending"] == "off":
+                    l["on"], l["value"], l["enable"] = False, -1, 0
+                else:
+                    l["on"], l["value"], l["enable"], l["limit"] = True, l["pending"], 1, l["pending"]
+                l["active"] = l["limit"] if l["on"] else 0
+                l["pending"] = None
+            ctl["limit"] = {"status": "ready", "id": "18002904", "unit": "kW", "min": 1, "max": 20, "limit": l["limit"], "active": l["active"],
+                            "enable": l["enable"], "on": l["on"], "value": l["value"]}
+        if ctl:
+            st["control"] = ctl
+        if c.get("stats", {}).get("enabled", True):
+            st["stats"] = {"heat_kw": 5.21, "elec_kw": 1.34, "cop": 3.89, "running": True, "mode": "heating", "current_min": 47,
+                           "today": {"heating": {"heat_kwh": 23.4, "elec_kwh": 6.9, "cop": 3.39},
+                                     "dhw": {"heat_kwh": 4.1, "elec_kwh": 1.6, "cop": 2.56},
+                                     "cooling": {"heat_kwh": 0, "elec_kwh": 0, "cop": None},
+                                     "starts": 7, "starts_hour": 1, "defrosts": 2, "run_min": 318, "buh_min": 0,
+                                     "last_run_min": 52, "last_pause_min": 23},
+                           "clock": True, "tz": c["stats"].get("tz", 60), "voltage_read": False}
+        return st
+
+    def events(self):
+        now = int(time.time())
+        up = int(time.time() - self.start)
+        items = [
+            (0, 3, 57, "Boot #58: restart by the firmware, firmware 2.0.0-mock"),
+            (now - up - 5, 312, 57, "Restart: No network for 5 minutes (WiFi 20:23:51:97:82:12 ch 6 -84 dBm, last disconnect NO_AP_FOUND)"),
+            (now - up - 20, 297, 57, "WiFi: disconnected, NO_AP_FOUND (201), 18 more attempts failed"),
+            (now - up - 300, 12, 57, "WiFi: disconnected, BEACON_TIMEOUT (200)"),
+            (now - up - 312, 0, 57, "Boot #57: power on, firmware 2.0.0-mock"),
+        ]
+        events = [{"t": now - up + 3, "up": 3, "boot": 58, "text": "Boot #58: restart by the firmware, firmware 2.0.0-mock"},
+                  {"t": now - up + 9, "up": 9, "boot": 58, "text": "WiFi: joined access point 6A:48:B8:EA:44:08, channel 9"},
+                  {"t": now - up + 10, "up": 10, "boot": 58, "text": "Online over WiFi: 192.168.1.42, -52 dBm"}]
+        events += [{"t": t, "up": u, "boot": b, "text": x} for t, u, b, x in items[1:]]
+        events.sort(key=lambda e: -e["t"])
+        return {"boot": 58, "uptime": up, "clock": True, "events": events}
+
+    def survey(self):
+        if time.time() < self.survey_until:
+            return {}
+        return {"v": 1, "fw": "2.0.0-mock", "board": "esp32", "protocol": "I",
+                "key": "I|63:017081710306|60:9482|CAP:5A|11:017053480100|00:1234",
+                "id": {"iu_eeprom": "017081710306", "iu_as": "AS1708171-3", "iu_sw": "9482", "iu_cap": 90, "iu_opt": 2, "iu_eeprom_ver": 0,
+                       "iu_code": "ABCD", "ou_eeprom": "017053480100", "ou_pn": "1P705348-1", "ou_mpu": "1234", "ou_cap": 160},
+                "regs": {"60": "0000000000ABCD5A00000000000291820700", "00": "050100010101000001011234", "A0": "00000000000000000000000000", "65": None},
+                "detect": {"model": MODELS[0][0], "family": "G", "confidence": "low", "method": "rules", "margin": 0,
+                           "candidates": [{"model": MODELS[0][0], "score": 88}, {"model": MODELS[1][0], "score": 88}, {"model": MODELS[2][0], "score": 88}]}}
+
+    def selected_keys(self, model):
+        labels = self.config["hp"]["labels"]
+        if model == self.config["hp"]["model"] and labels:
+            return set(labels)
+        return {key(r, o, c) for r, o, c, l, rec in CATALOG
+                if (rec is True or (rec and self.bizone)) and l not in self.leave_out}
+
+    def reading(self, r, o, c, l):
+        base, drift = READINGS.get(l, (0, 0))
+        if self.bizone and l == "LW setpoint (main)":
+            base = 30  # the mixed zone target
+        return {217: "Heating", 304: "OFF", 301: "ON", 302: "ON"}.get(c, "%.1f" % (base + drift * math.sin(time.time() / 40 + r + o)))
+
+    def values(self):
+        model = self.config["hp"]["model"]
+        if not model:
+            return []
+        sel = self.selected_keys(model)
+        out = []
+        for r, o, c, l, _ in CATALOG:
+            if key(r, o, c) not in sel:
+                continue
+            out.append({"l": l, "v": self.reading(r, o, c, l), "r": r})
+        return out
+
+
+class Handler(BaseHTTPRequestHandler):
+    device = None
+
+    def log_message(self, *args):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else (body if isinstance(body, str) else json.dumps(body)).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_GET(self):
+        d = self.device
+        url = urlparse(self.path)
+        p = url.path
+        if p == "/":
+            return self.send(200, webpage.render(ROOT).encode("utf-8"), "text/html")
+        if p == "/api/status":
+            return self.send(200, d.status())
+        if p == "/api/config":
+            return self.send(200, d.config)
+        if p == "/api/detect":
+            return self.send(200, d.survey())
+        if p == "/api/events":
+            return self.send(200, d.events())
+        if p == "/api/memory":
+            m = getattr(d, "memory", None) or {"busy": False, "done": False, "ok": False, "addr": "0x0000", "len": 0, "hex": ""}
+            return self.send(200, m)
+        if p == "/api/models":
+            return self.send(200, [{"name": n, "family": f, "protocol": pr} for n, f, pr in MODELS])
+        if p == "/api/catalog":
+            model = parse_qs(url.query).get("model", [d.config["hp"]["model"]])[0]
+            sel = d.selected_keys(model)
+            return self.send(200, [{"k": key(r, o, c), "r": r, "o": o, "c": c, "l": l, "rec": rec, "sel": key(r, o, c) in sel, "v": d.reading(r, o, c, l)}
+                                  for r, o, c, l, rec in CATALOG])
+        if p == "/api/values":
+            return self.send(200, d.values())
+        if p == "/api/wifi/scan":
+            return self.send(200, {"running": False, "networks": [{"ssid": "HomeWiFi", "rssi": -52, "secure": True}, {"ssid": "Neighbour", "rssi": -80, "secure": True}]})
+        if p == "/api/discover":
+            running = time.time() < d.discover_until
+            return self.send(200, {"running": running, "done": not running, "hosts": [] if running else [
+                {"name": "homeassistant", "ip": "192.168.1.10", "port": 1883, "ha": True, "mqtt": True}]})
+        if p == "/api/mqtt/test":
+            if time.time() < d.mqtt_test_until:
+                return self.send(200, {"result": "running"})
+            if not d.config["mqtt"]["server"].startswith("192.168."):
+                return self.send(200, {"result": "error", "reason": "broker unreachable", "state": -2})
+            return self.send(200, {"result": "ok"})
+        if p == "/api/log":
+            return self.send(200, d.log, "text/plain")
+        if p == "/api/telemetry":
+            return self.send(200, {"install_id": d.config["telemetry"]["install_id"], "model": d.config["hp"]["model"],
+                                   "confirmed": d.config["hp"]["confirmed"], "report": d.survey()})
+        if p == "/events":
+            return self.events()
+        self.send(404, {"ok": False, "error": "not found"})
+
+    def events(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            while True:
+                for event, data in (("values", self.device.values()), ("status", self.device.status())):
+                    self.wfile.write(("event: %s\ndata: %s\n\n" % (event, json.dumps(data))).encode())
+                self.wfile.write(("event: log\ndata: Querying register 0x61... CRC OK!\n\n").encode())
+                self.wfile.flush()
+                time.sleep(5)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    def do_POST(self):
+        d = self.device
+        p = urlparse(self.path).path
+        if p == "/api/memory":
+            data = self.body()
+            addr, n = int(str(data.get("addr", "0")), 0), int(data.get("len", 16))
+            d.memory = {"busy": False, "done": True, "ok": True, "addr": "0x%04X" % addr, "len": n,
+                        "hex": "".join("%02X" % ((addr + i) & 0xFF) for i in range(n))}
+            return self.send(200, {"ok": True})
+        if p == "/api/config":
+            data = self.body()
+            with d.lock:
+                for section, values in data.items():
+                    if isinstance(values, dict):
+                        target = d.config.setdefault(section, {})
+                        for k, v in values.items():
+                            if k == "pwd":
+                                target["has_pwd"] = bool(v)
+                            else:
+                                target[k] = v
+                    else:
+                        d.config[section] = values
+            return self.send(200, {"ok": True, "reboot": "relays" in data})
+        if p == "/api/detect":
+            d.survey_until = time.time() + 5
+            return self.send(200, {"ok": True})
+        if p == "/api/control":
+            data = self.body()
+            if "power_limit" in data or "power_limit_on" in data:
+                if not d.config["control"].get("power_limit"):
+                    return self.send(409, {"ok": False, "error": "not ready"})
+                if "power_limit_on" in data:
+                    d.limit["pending"] = (d.limit["value"] if d.limit["value"] > 0 else d.limit["limit"]) if data["power_limit_on"] else "off"
+                else:
+                    v = data["power_limit"]
+                    if not isinstance(v, (int, float)) or not 1 <= v <= 20:
+                        return self.send(400, {"ok": False, "error": "out of range"})
+                    d.limit["pending"] = float(v)
+                d.limit["applied_at"] = time.time()
+                return self.send(200, {"ok": True})
+            k = "lwt" if "lwt_target" in data else "dhw"
+            if not d.config["control"].get(k + "_target"):
+                return self.send(409, {"ok": False, "error": "not ready"})
+            value = data.get(k + "_target")
+            if not isinstance(value, int) or not d.ctl[k]["min"] <= value <= d.ctl[k]["max"]:
+                return self.send(400, {"ok": False, "error": "out of range"})
+            d.ctl[k]["pending"] = value
+            d.ctl[k]["applied_at"] = time.time()
+            return self.send(200, {"ok": True})
+        if p == "/api/discover":
+            d.discover_until = time.time() + 3
+            return self.send(200, {"ok": True})
+        if p == "/api/mqtt/test":
+            d.mqtt_test_until = time.time() + 2
+            return self.send(200, {"ok": True})
+        if p in ("/api/reboot", "/api/factory-reset", "/update"):
+            return self.send(200, {"ok": True})
+        self.send(404, {"ok": False, "error": "not found"})
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--fresh", action="store_true", help="start like a freshly flashed device")
+    ap.add_argument("--ethernet", action="store_true", help="a board connected by Ethernet")
+    ap.add_argument("--bizone", action="store_true", help="a two-zone unit (mixed zone values)")
+    ap.add_argument("--nodhw", action="store_true", help="no hot water tank: its values are not selected")
+    ap.add_argument("--noroom", action="store_true", help="no room thermostat: its values are not selected")
+    ap.add_argument("--limit", action="store_true", help="the power limit option on")
+    args = ap.parse_args()
+    global LIMIT_ON
+    LIMIT_ON = args.limit
+    leave_out = ({"DHW tank temp. (R5T)", "DHW setpoint"} if args.nodhw else set()) | \
+        ({"Indoor ambient temp. (R1T)", "RT setpoint"} if args.noroom else set())
+    Handler.device = Device(args.fresh, args.ethernet, args.bizone, leave_out)
+    print("Mock ESPAltherma on http://localhost:%d" % args.port)
+    ThreadingHTTPServer(("", args.port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

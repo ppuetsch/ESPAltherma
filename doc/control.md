@@ -1,0 +1,76 @@
+# Controlling the heat pump: the details
+
+The [README](../README.md#controlling-the-heat-pump) has the short version of each control. This page keeps the rest.
+
+## The thermostat relay
+
+Adding the relay takes priority on your thermostat: ESPAltherma turns the heating on and off, the thermostat is in standby.
+
+Note: I resoldered the J1 jumper that was cut when installing my digital thermostat (not sure if it is needed) and configured my *type of thermostat* as *External thermostat*.
+
+On a ROTEX this connects to J16 pins 1 and 2. RT needs to be switched ON in the heat pump's Connection menu. Heating is ON if the pins are connected, else no heating, so connect to the NC (normally closed) contact of the relay.
+
+Other users' installations are described [in this issue](https://github.com/raomin/ESPAltherma/issues/17).
+
+## Smart Grid
+
+The two relays open and close the SG1 and SG2 contacts of the heat pump; the mode is the combination of the two:
+
+| sg/set value | SG1 | SG2 | SG mode | Working mode | Typical result |
+| ------------ | --- | --- | ------- | ------------ | -------------- |
+| 0 | open | open | 0 - normal operation | normal working mode | HP works like if SG features are disabled/not used |
+| 1 | open | close | 1 - Forced OFF | HP is forced OFF | Heating and DHW will be turned OFF - *Beware that your comfort may be negatively affected by this working mode* |
+| 2 | close | open | 2 - Recommended ON | HP is recommended to be ON | HP will increase DHW setpoint as well as LW setpoint (documentation says +5 °C, but my tests actually show +6 °C) |
+| 3 | close | close | 3 - Force ON | HP is forced ON | HP will increase DHW setpoint and will use its full power to heat DHW (to 70 °C) |
+
+*Note that in SG3 mode your HP will really be power hungry so make sure to enable it only when electricity cost is low (ideally free) or be prepared to get a high bill!*
+
+Depending on your HP model, SG3 might be configurable in "ECO mode", "Normal mode" or "Comfort mode". The mode can be set using the specialist code: Main Menu > Settings > Input/Output.
+
+| SG mode | Description |
+| ------- | ----------- |
+| Comfort mode | Increase of the hot water set temperature by 5 K. |
+| Normal mode | Increase of flow set temperature by 2 K and hot water set temperature by 5 K. |
+| ECO mode | Increase the flow set temperature by 5 K and hot water set temperature by 7 K. |
+
+Smart Grid needs to be switched ON in the heat pump configuration menu, otherwise the SG1 and SG2 contacts are not evaluated.
+
+Coming from v1: the pins set in Settings → Relays replace `PIN_SG1`/`PIN_SG2` of `setup.h`. Until they are set (-1), the Smart Grid select is not in Home Assistant. On a ROTEX, the SG1 and SG2 contacts are located in the J8 connector, pins 5-6 (Smart Grid) and 11-12 (EVU).
+
+## Hot water and leaving water targets
+
+The user interface of the heat pump owns the setpoints it shows and re-sends them to the hydro board every second, so they cannot be changed through the X10A port. But when a setpoint mode is *weather dependent*, the hydro board computes that target itself from its own curve. ESPAltherma can then write the wanted target into both points of that curve: the target holds whatever the weather, it applies within a second, and it is saved in the unit so it survives a restart. This works for the hot water tank and for the leaving water of the main zone (the water sent to the floor or the radiators).
+
+To try it:
+
+1. On the user interface of the heat pump, set the tank setpoint mode, or the leaving water setpoint mode of the main zone, to *weather dependent* ("loi d'eau" on a French interface).
+2. In ESPAltherma, tick the corresponding box under **Settings → Experimental**.
+3. The home page shows a *Hot water target* or *Leaving water target* card with the current target and the allowed range (the unit's own limits). Home Assistant gets a `Hot water target` and a `Leaving water target` number entity; the MQTT topics are `espaltherma/dhw_target/set` and `espaltherma/lwt_target/set` (a whole number of degrees), with the state on `.../state`.
+
+Next to the target, the card shows what the thermostat really aims for, with an explanation on hover. The hot water target is capped by the maximum the heat pump reaches on its own at the current outdoor temperature (about 50 °C on a mild day; above that the booster heater would have to finish), so asking for 55 heats the tank to that maximum. The leaving water target carries the shift and the room modulation set on the unit. Home Assistant gets these as the `effective` and `ceiling` attributes of the entities (on MQTT, `.../attributes`).
+
+The card tells you when it cannot work: the unit did not answer, the setpoint mode is not weather dependent, or the hydro board software is not supported. The addresses written are specific to the software of the hydro board, read from the unit at start; only the versions whose addresses are known are accepted, nothing is written on any other. Known so far: 18002904 (the 16 kW EAV/EAB DA, DF and DJ series, found on an EAVH16S18DA6V and tested there), and from the boards' software, each awaiting a first report: 17014006 (4-8 kW EHV/EHB DA and DJ), 17019A04 (4-8 kW ECH2O D), 20002202 (the same 9-16 kW EBLA/EDLA D monoblocs on their earlier software, from a memory dump of an EDLA14DAW1), 20002203 (4-8 kW EHV/EHB E, 9-16 kW EBLA/EDLA monoblocs), 20007903 (11-16 kW EBB/EBV DF and DJ and ECH2O DF and DG, the Altherma 3 H F on ERLA outdoor units), 20007904 (12 kW ETV/ETB and ECH2O E), 20017704 (4-8 kW ECH2O E, 4-8 kW EBLA/EDLA E monoblocs), 20017701 (the same ECH2O boards on their earlier software, from a memory dump of an EHSXB08P50EF), 20017705 (16 kW ETV/ETB and ECH2O E, the leaving water target confirmed on an ETBH16EF9W9), 22009C02 (12 kW ELV/ELB and ECH2O, 2026) and 76F2 (4-16 kW EHVH/EHVX/EHBH/EHBX CB series of 2014-2017; these boards have no software command and report their software in a registry, two hexadecimal bytes, the same as the Values page shows as "I/U Software ID"; its addresses were read back on an owner's unit). If your unit shows "not available", please open an issue with the software version shown.
+
+**Getting the unit's curve back.** ESPAltherma remembers the two points of the curve it found before its first write (kept across restarts, as long as the hydro board software is the same). The card then shows "Before ESPAltherma, the curve of the unit was ... " with a **Restore the unit's curve** button; Home Assistant gets a `Restore hot water curve` / `Restore leaving water curve` button entity, and `restore` sent to `espaltherma/dhw_target/set` or `espaltherma/lwt_target/set` does the same. The restore writes both points at once in the RAM and in the memory (the memory keeps its 5 minute interval), then ESPAltherma forgets them: the next target you apply captures the curve anew. Re-entering the curve on the user interface, or switching the setpoint mode to absolute, works too.
+
+Things to know:
+
+- The target is written in the unit's RAM at once, and in its memory 30 seconds later (at most every 5 minutes) so that a bouncing automation does not wear the memory.
+- **Working memory only** (Settings → Experimental, *Keep the targets in the unit's working memory only*): for a target an automation changes all day long (price, solar surplus), even one save every 5 minutes adds up to tens of thousands of memory writes a year. With this box ticked the memory is never written and keeps the unit's own curve; the target is held instead, like the power limit: a restart of the heat pump, or saving the curve screen on its interface, reloads the unit's curve, and ESPAltherma writes the held target into the RAM again at its next read-back, within 2 minutes. After a power cut that restarted ESPAltherma as well (when the X10A port powers it), the unit is tried again half a minute after the start, then less and less often: the target is back a minute or two after the unit is. **Restore the unit's curve** ends the hold and writes the RAM only (the memory still has the curve). If a target was saved in the memory before the box was ticked, the restore writes the memory once to put the curve back. Unticking the box saves the held target in the memory, like a new request, and ends the hold. The hold survives a restart of ESPAltherma (it is kept in the settings with the hydro board software it belongs to) and a heat pump that stops answering for a while, but ends when the setpoint mode leaves *weather dependent* or the hydro board software changes. The MQTT attributes give `ram_only` and `held` (-1: none). With the box ticked the **leaving water range** goes up to the unit's own maximum ([9-00], 55 on most units, 65 or 70 on the Altherma 3 H HT) instead of 45: that 45 is the interface's rule for the mild point of the curve, which the memory never gets here, while the thermostat follows the curve up to [9-00] (checked on an 18002904: a flat 47 gave a 50 °C target with a +3 K shift). Unticking the box saves the held target within the memory's range.
+- The hot water thermostat starts heating when the tank falls a few degrees under the target it aims for (the hysteresis set on the unit, 5 °C by default) and stops at that target. Raising the target by one degree moves both thresholds by one degree, nothing more.
+- The user interface keeps showing its old curve until it restarts; saving that screen again on the interface writes the old curve back.
+- Switching a setpoint mode back to *absolute* on the interface stops ESPAltherma writing that target; the interface's own setpoint applies again.
+
+## Power limit
+
+The installer's "power limitation" field settings live in the hydro board: an enable byte (none, continuous, digital inputs), a kind (current in A or power in kW) and four limits per kind. In continuous mode the board applies limit 1; what it applies is readable as the active limit. ESPAltherma writes limit 1 and the enable byte in RAM (the `F` command), reads the active limit back, and remembers the enable byte found first to put it back when the limit is switched off. The board's memory (`E`) is not written: a restart of the heat pump brings the installer's settings back, and ESPAltherma, which keeps the wanted limit in its configuration, writes it again within two minutes, at most once a minute.
+
+The words are known for the same hydro board softwares as the targets: 18002904 is the one tested on a unit; on 20002202 they were read by an owner while changing the installer's settings (the active limit the board applies is not known there, so it is not shown); on 17014006 and 17019A04 the limitation code is the reference's; on 20002203, 20007903, 20007904, 20017701 (from the dump), 20017704, 20017705 and 22009C02 the board keeps a separate active limit for the current kind, which ESPAltherma reads when the unit is set to amps; 76F2 keeps one active limit for both kinds, as 18002904. As for the targets, the first report from each board is what turns the address list into a confirmed one.
+
+Observed on an EAVH16S18DA6V (software 18002904): a 2 kW limit stalled the ramp at 41 rps, a 1 kW limit, under the compressor's minimum, stopped the compressor within 30 seconds, and the unit restarted four minutes after the limit was released. Hence the floors, 1 kW and 4 A. The MQTT attributes give `active` (what the unit applies), `unit_limit` (limit 1 as the unit holds it), `enable`, `kind`, `min` and `max`.
+
+## The unit's own energy meter and counters
+
+The hydro board keeps the energy meter the user interface shows under energy metering: the heat produced since the installation, in kWh. Where its address in the board's RAM is known, ESPAltherma reads it once a minute and publishes it in Home Assistant as "Unit meter: Heat produced (kWh)", a lifetime total the statistics graphs can use, and as the attribute of the same name on MQTT. With it come the unit's operating hours and starts, the numbers of the interface's *Information > Operating hours* screen: "Unit meter: Compressor hours, space heating (h)", "… space cooling (h)", "… hot water (h)", "Unit meter: Pump hours (h)" and "Unit meter: Compressor starts", lifetime totals too. Nothing is written. Just after a power-up, while the board still reads 0, nothing is published (Home Assistant would take the 0 for a reset and count the whole total again), and a count read lower than one already read is ignored.
+
+The meter is a 32-bit count the board keeps next to its registers, cast from the sum of the heat of the three modes; the hours and starts are 32-bit counts the board loads from its persistent block at start, each from its own slot of that block, the starts being the sum of three per-mode counts. The same code in every software, which is how the addresses were found: 76F2 (read on an owner's unit), 18002904 (read on a unit: the meter equals the sum of the three mode floats, the starts the sum of the per-mode counts), 20002203 (hours and starts equal to the interface's, [the details](memory-20002203.md)), 20002202 (from a memory dump, the meter and the starts checked), 5190 (the Altherma Hybrid, read on an owner's unit against its interface), and from the software alone 17014006, 17019A04, 19016505, 20007903, 20007904, 20017704, 20017705, 22009C02 and 23015103. A first comparison with the interface's screens on each of those is welcome: open an issue with both numbers.

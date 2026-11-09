@@ -1,19 +1,24 @@
 #ifndef COMM_H
 #define COMM_H
+#include <string.h>
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
-#ifdef ARDUINO_ARCH_ESP8266
-#include <SoftwareSerial.h>
-SoftwareSerial MySerial;
-#define SERIAL_CONFIG (SWSERIAL_8E1)
-#define SERIAL_FLUSH_TX_ONLY // empty, as SoftwareSerial.flush() takes no parameter
-#else
 HardwareSerial MySerial(1);
 #define SERIAL_CONFIG (SERIAL_8E1)
 #define SERIAL_FLUSH_TX_ONLY false
-#endif
 #define SER_TIMEOUT 300 //leave 300ms for the machine to answer
+#define REPLY_BUFFER_SIZE 64 //size of the buffers given to queryRegistry
+
+// The Altherma HT read on its outdoor unit: registry 0x50 is the hydrobox's block, answered only to a query that
+// carries the hydrobox's address (04 40 50 <address>). The survey learns the address from registry 0x40.
+uint8_t x10aIndoorAddress = 0x01;
+
+// The X10A link is shared by the polling task, the detection survey and the DebugSerial gateway.
+// Recursive: the DebugSerial callback runs client.loop() while holding it, which can re-enter it.
+SemaphoreHandle_t serialMutex = xSemaphoreCreateRecursiveMutex();
+void serialLock() { xSemaphoreTakeRecursive(serialMutex, portMAX_DELAY); }
+void serialUnlock() { xSemaphoreGiveRecursive(serialMutex); }
 
 unsigned char getCRC(unsigned char *src, int len)
 {
@@ -27,10 +32,12 @@ unsigned char getCRC(unsigned char *src, int len)
 
 void logBuffer(unsigned char *buffer, size_t len)
 {
-  char bufflog[250] = {0};
+  char bufflog[REPLY_BUFFER_SIZE * 5 + 1] = {0}; // "0x%02x " is 5 characters a byte (#595)
+  if (len > REPLY_BUFFER_SIZE)
+    len = REPLY_BUFFER_SIZE;
   for (size_t i = 0; i < len; i++)
   {
-    sprintf(bufflog + i * 5, "0x%02x ", buffer[i]);
+    snprintf(bufflog + i * 5, sizeof(bufflog) - i * 5, "0x%02x ", buffer[i]);
   }
   mqttSerial.print(bufflog);
 }
@@ -58,13 +65,65 @@ int get_reply_len(char regID, char protocol='I')
   }
 }
 
+// Sends a raw frame and collects the reply: until 100 ms pass without a byte, or firstByteMs without any.
+// Used by the hot water target control (control.h).
+size_t x10aExchange(const uint8_t *frame, size_t len, uint8_t *reply, size_t maxLen, unsigned long firstByteMs)
+{
+  serialLock();
+  MySerial.flush(SERIAL_FLUSH_TX_ONLY);
+  while (MySerial.available())
+    MySerial.read(); // left over from an earlier exchange
+  MySerial.write(frame, len);
+  unsigned long start = millis(), last = start;
+  size_t n = 0;
+  bool echoSkipped = false;
+  while (n < maxLen)
+  {
+    if (MySerial.available())
+    {
+      reply[n++] = MySerial.read();
+      last = millis();
+      if (!echoSkipped && n == len && memcmp(reply, frame, len) == 0)
+      {
+        echoSkipped = true; // our own frame, echoed by a bidirectional level shifter (#585)
+        n = 0;
+      }
+      continue;
+    }
+    if (n == 0 ? millis() - start >= firstByteMs : millis() - last >= 100)
+      break;
+    delay(1);
+  }
+  serialUnlock();
+  return n;
+}
+
+bool queryRegistryUnlocked(char regID, unsigned char *buffer, char protocol);
+
 bool queryRegistry(char regID, unsigned char *buffer, char protocol='I')
+{
+  serialLock();
+  bool ok = queryRegistryUnlocked(regID, buffer, protocol);
+  serialUnlock();
+  return ok;
+}
+
+bool queryRegistryUnlocked(char regID, unsigned char *buffer, char protocol)
 {
 
   //preparing command:
-  unsigned char prep[] = {0x03, 0x40, regID, 0x00};
+  unsigned char prep[] = {0x03, 0x40, regID, 0x00, 0x00};
   prep[3] = getCRC(prep, 3);
   int queryLength = 4;
+
+  if (protocol == 'I' && (uint8_t)regID == 0x50)
+  {
+    // no protocol I definition reads 0x50 but the Altherma HT outdoor unit's: its hydrobox block, by address
+    prep[0] = 0x04;
+    prep[3] = x10aIndoorAddress;
+    prep[4] = getCRC(prep, 4);
+    queryLength = 5;
+  }
 
   if (protocol == 'S')
   {
@@ -83,25 +142,42 @@ bool queryRegistry(char regID, unsigned char *buffer, char protocol='I')
 
   int len = 0;
   int replyLen = get_reply_len(regID, protocol);
+  bool echoSkipped = false;
 
   while ((len < replyLen) && (millis() < (start + SER_TIMEOUT)))
   {
-    if (MySerial.available())
+    if (!MySerial.available())
     {
-      buffer[len++] = MySerial.read();
-      if (protocol == 'I' && len == 3)
-      {
-        // Override reply length with the actual one (not counting already read bytes, see doc/Daikin I protocol.md)
-        replyLen = buffer[2] + 2;
-      }
-      // Error reply common to both protocols
-      if (len == 2 && buffer[0] == 0x15 && buffer[1] == 0xea)
-      {
-        // HP didn't understand the command
-        mqttSerial.printf("Error 0x15 0xEA returned from HP\n");
-        delay(500);
-        return false;
-      }
+      delay(1); //let other tasks run while the bytes arrive (the UART buffers them)
+      continue;
+    }
+    if (len >= REPLY_BUFFER_SIZE)
+    {
+      mqttSerial.printf("ERR: Reply of register 0x%02x too long (%d bytes)\n", regID, replyLen);
+      delay(500);
+      return false;
+    }
+    buffer[len++] = MySerial.read();
+    if (!echoSkipped && len == queryLength && memcmp(buffer, prep, queryLength) == 0)
+    {
+      // A bidirectional level shifter hands our own query back before the reply (#585): drop it
+      echoSkipped = true;
+      len = 0;
+      replyLen = get_reply_len(regID, protocol);
+      continue;
+    }
+    if (protocol == 'I' && len == 3)
+    {
+      // Override reply length with the actual one (not counting already read bytes, see doc/Daikin I protocol.md)
+      replyLen = buffer[2] + 2;
+    }
+    // Error reply common to both protocols
+    if (len == 2 && buffer[0] == 0x15 && buffer[1] == 0xea)
+    {
+      // HP didn't understand the command
+      mqttSerial.printf("Error 0x15 0xEA returned from HP\n");
+      delay(500);
+      return false;
     }
   }
   if (millis() >= (start + SER_TIMEOUT))

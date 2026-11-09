@@ -4,26 +4,53 @@
 #include <HardwareSerial.h>
 #include <homeassistant.h>
 
-const char *discovery_json_start = "{\"dev\":{\"ids\":\"espaltherma-mqtt-discovery\",\"name\":\"Daikin Altherma via ESPAltherma\",\"mf\":\"Daikin\",\"mdl\":\"Altherma\"},\"o\":{\"name\":\"espaltherma-mqtt-discovery\",\"sw\":\"0.1\",\"url\":\"https://github.com/raomin/ESPAltherma/\"},\"cmps\":{";
-const char *discovery_json_end = "},\"stat_t\":\"espaltherma/ATTR\",\"qos\": 2}";
+// The device and the topics come from the configurable base topic (topics.h); set by setupMqttClient()
+const char *haIdPrefix = "espaltherma";
+const char *haDeviceId = "espaltherma-mqtt-discovery";
+const char *haDeviceName = "Daikin Altherma via ESPAltherma";
+const char *haAttrTopic = "espaltherma/ATTR";
+
+static std::string discoveryStart()
+{
+    return std::string("{\"dev\":{\"ids\":\"") + haDeviceId + "\",\"name\":\"" + haDeviceName +
+           "\",\"mf\":\"Daikin\",\"mdl\":\"Altherma\"},\"o\":{\"name\":\"" + haDeviceId +
+           "\",\"sw\":\"0.1\",\"url\":\"https://github.com/raomin/ESPAltherma/\"},\"cmps\":{";
+}
+
+static std::string discoveryEnd()
+{
+    return std::string("},\"stat_t\":\"") + haAttrTopic + "\",\"qos\": 2}";
+}
 
 #define ESP_SENSOR_M5BATV 999
 #define ESP_SENSOR_WIFI_RSSI 998
 #define ESP_SENSOR_FREE_MEM 997
+#define ESP_SENSOR_M5VIN 996
+#define ESP_SENSOR_UPTIME 995
+#define ESP_SENSOR_IP 994
+
+bool haBinaryAsNumber = false;
 
 const LabelDef battery_voltage = {-1, -1, -1, -1, ESP_SENSOR_M5BATV, "M5BatV"};
 const LabelDef wifi_rssi = {-1, -1, -1, -1, ESP_SENSOR_WIFI_RSSI, "WifiRSSI"};
 const LabelDef free_mem = {-1, -1, -1, -1, ESP_SENSOR_FREE_MEM, "FreeMem"};
+const LabelDef m5_vin = {-1, -1, -1, -1, ESP_SENSOR_M5VIN, "M5VIN"};
+const LabelDef uptime = {-1, -1, -1, -1, ESP_SENSOR_UPTIME, "Uptime"};
+const LabelDef ip_addr = {-1, -1, -1, -1, ESP_SENSOR_IP, "IP"};
+const LabelDef *haExtraLabels = nullptr;
+size_t haExtraCount = 0;
 
 static bool isMeasurementSensor(const std::string &sensorProperties)
 {
     // A numeric converter alone does not make a value a measurement. For example,
     // detailed error codes are numeric but should not participate in statistics.
     return sensorProperties.find("\"p\":\"sensor\"") != std::string::npos &&
-           sensorProperties.find("\"unit_of_meas\"") != std::string::npos;
+           sensorProperties.find("\"unit_of_meas\"") != std::string::npos &&
+           sensorProperties.find("\"stat_cla\"") == std::string::npos; // the computed values set their own
 }
 
-size_t streamDeviceDiscoveryPayload(const LabelDef *labels, size_t count, DiscoverySink sink, void *ctx)
+size_t streamDeviceDiscoveryPayload(const LabelDef *labels, size_t count, DiscoverySink sink, void *ctx,
+                                    const std::vector<HaComponent> *removed)
 {
     size_t total = 0;
     auto emit = [&](const char *data, size_t len) {
@@ -34,15 +61,29 @@ size_t streamDeviceDiscoveryPayload(const LabelDef *labels, size_t count, Discov
         }
     };
 
-    emit(discovery_json_start, strlen(discovery_json_start));
+    std::string s = discoveryStart();
+    emit(s.data(), s.size());
 
     // Hardcoded ESP diagnostic sensors.
-    std::string s = makeSensorJson(battery_voltage, true);
+    s = makeSensorJson(wifi_rssi, true);
     emit(s.data(), s.size());
-    s = "," + makeSensorJson(wifi_rssi, true);
+#if defined(ARDUINO_M5Stick_C)
+    // Battery voltage: only the M5StickC boards (all three build with ARDUINO_M5Stick_C) publish it. Announced on
+    // other boards, Home Assistant logs a template warning at every reading.
+    s = "," + makeSensorJson(battery_voltage, true);
     emit(s.data(), s.size());
+#endif
     s = "," + makeSensorJson(free_mem, true);
     emit(s.data(), s.size());
+    s = "," + makeSensorJson(uptime, true);
+    emit(s.data(), s.size());
+    s = "," + makeSensorJson(ip_addr, true);
+    emit(s.data(), s.size());
+#if defined(ARDUINO_M5Stick_C) && !defined(ARDUINO_M5Stick_C_Plus2)
+    // Supply voltage, published by the AXP192 boards: shows the drops of a weak 5V supply
+    s = "," + makeSensorJson(m5_vin, true);
+    emit(s.data(), s.size());
+#endif
 
     // Sensors from the active definition file. Each component is streamed on its own so the
     // payload is never held in memory all at once.
@@ -51,16 +92,55 @@ size_t streamDeviceDiscoveryPayload(const LabelDef *labels, size_t count, Discov
         s = "," + makeSensorJson(labels[i], false);
         emit(s.data(), s.size());
     }
+    // The values the firmware computes (energy and cycle statistics)
+    for (size_t i = 0; i < haExtraCount; i++)
+    {
+        s = "," + makeSensorJson(haExtraLabels[i], false);
+        emit(s.data(), s.size());
+    }
+    // Values no longer selected: only their platform, so Home Assistant removes their entities
+    for (size_t i = 0; removed != nullptr && i < removed->size(); i++)
+    {
+        s = haRemovalJson((*removed)[i]);
+        emit(s.data(), s.size());
+    }
 
-    emit(discovery_json_end, strlen(discovery_json_end));
+    s = discoveryEnd();
+    emit(s.data(), s.size());
 
     return total;
+}
+
+std::vector<HaComponent> haComponents(const LabelDef *labels, size_t count)
+{
+    std::vector<HaComponent> out;
+    for (size_t i = 0; i < count; i++)
+    {
+        bool binary = getSensorDeviceAndUnit(labels[i]).find("\"p\":\"binary_sensor\"") != std::string::npos;
+        out.push_back({makeJsonKey(labels[i].label), binary ? "binary_sensor" : "sensor"});
+    }
+    for (size_t i = 0; i < haExtraCount; i++)
+        out.push_back({makeJsonKey(haExtraLabels[i].label), "sensor"});
+    return out;
+}
+
+// Translated names may hold quotes
+static std::string jsonEscape(const char *s)
+{
+    std::string out;
+    for (; *s; s++)
+    {
+        if (*s == '"' || *s == '\\')
+            out += '\\';
+        out += *s;
+    }
+    return out;
 }
 
 std::string makeSensorJson(const LabelDef &label, bool isDiagnostic)
 {
     const std::string key = makeJsonKey(label.label);
-    const std::string uid = "espaltherma_" + key;
+    const std::string uid = std::string(haIdPrefix) + "_" + key;
 
     std::string json;
     json.reserve(512);
@@ -84,7 +164,7 @@ std::string makeSensorJson(const LabelDef &label, bool isDiagnostic)
     json += isBinarySensor ? "binary_sensor." : "sensor.";
     json += uid + "\",";
     json += "\"name\":\"";
-    json += label.label;
+    json += jsonEscape(label.name != nullptr ? label.name : label.label); // in the chosen language; the ids stay English
     json += "\"";
 
     // "an entity that exposes some configuration parameter or diagnostics of a device but does not allow changing it, for example, a sensor showing RSSI or MAC address"
@@ -104,11 +184,24 @@ std::string getConversion(const LabelDef &label)
     {
         // Backwards-compatible workaround for the built-in ESP sensors returning a string with an optional unit, like "-42dBm" instead of just -42.
         case ESP_SENSOR_M5BATV:
+        case ESP_SENSOR_M5VIN:
             return "|replace('V','')|float";
         case ESP_SENSOR_WIFI_RSSI:
             return "|replace('dBm','')|int";
         case ESP_SENSOR_FREE_MEM:
+        case ESP_SENSOR_UPTIME:
             return "|int";
+        // the computed values are sent as numbers, or null when not known: the template then renders "None", the
+        // one word the MQTT sensor takes for unknown (a string such as 'unknown' is refused on a numeric sensor,
+        // which keeps its last value)
+        case ESP_SENSOR_POWER_KW:
+        case ESP_SENSOR_ENERGY_KWH:
+        case ESP_SENSOR_RATIO:
+        case ESP_SENSOR_COUNT:
+        case ESP_SENSOR_MINUTES:
+        case ESP_SENSOR_HOURS:
+        case ESP_SENSOR_TOTAL:
+            return std::string(" if value_json['") + label.label + "'] is not none else None";
     }
     return "";
 }
@@ -120,6 +213,7 @@ std::string getSensorDeviceAndUnit(const LabelDef &label)
         // Hardcoded ones for ESP:
         // "M5BatV" (voltage in V)
         case ESP_SENSOR_M5BATV:
+        case ESP_SENSOR_M5VIN:
             return "\"p\":\"sensor\",\"dev_cla\":\"voltage\",\"unit_of_meas\":\"V\",";
         // "WifiRSSI" (signal_strength in dBm)
         case ESP_SENSOR_WIFI_RSSI:
@@ -127,6 +221,27 @@ std::string getSensorDeviceAndUnit(const LabelDef &label)
         // "FreeMem" (data_size in b)
         case ESP_SENSOR_FREE_MEM:
             return "\"p\":\"sensor\",\"dev_cla\":\"data_size\",\"unit_of_meas\":\"B\",";
+        // "Uptime" (seconds since the last restart)
+        case ESP_SENSOR_UPTIME:
+            return "\"p\":\"sensor\",\"dev_cla\":\"duration\",\"unit_of_meas\":\"s\",";
+        // "IP" (the board's address on the network, a text)
+        case ESP_SENSOR_IP:
+            return "\"p\":\"sensor\",\"icon\":\"mdi:ip-network\",";
+        // the computed statistics (stats.h)
+        case ESP_SENSOR_POWER_KW:
+            return "\"p\":\"sensor\",\"dev_cla\":\"power\",\"unit_of_meas\":\"kW\",\"sug_dsp_prc\":2,";
+        case ESP_SENSOR_ENERGY_KWH: // the day's total: Home Assistant sees the reset at midnight as a new period
+            return "\"p\":\"sensor\",\"dev_cla\":\"energy\",\"unit_of_meas\":\"kWh\",\"stat_cla\":\"total_increasing\",\"sug_dsp_prc\":2,";
+        case ESP_SENSOR_RATIO:
+            return "\"p\":\"sensor\",\"icon\":\"mdi:gauge\",\"stat_cla\":\"measurement\",\"sug_dsp_prc\":2,";
+        case ESP_SENSOR_COUNT:
+            return "\"p\":\"sensor\",\"icon\":\"mdi:counter\",\"stat_cla\":\"measurement\",";
+        case ESP_SENSOR_MINUTES:
+            return "\"p\":\"sensor\",\"dev_cla\":\"duration\",\"unit_of_meas\":\"min\",\"stat_cla\":\"measurement\",";
+        case ESP_SENSOR_HOURS:
+            return "\"p\":\"sensor\",\"dev_cla\":\"duration\",\"unit_of_meas\":\"h\",\"stat_cla\":\"total_increasing\",";
+        case ESP_SENSOR_TOTAL:
+            return "\"p\":\"sensor\",\"icon\":\"mdi:counter\",\"stat_cla\":\"total_increasing\",";
 
         /// Built-in ones:
         // TODO: move magic numbers to consts
@@ -144,7 +259,7 @@ std::string getSensorDeviceAndUnit(const LabelDef &label)
     // ON/OFF
     if (label.convid >= 300 && label.convid <= 307 || label.convid == 200)
     {
-        return "\"p\":\"binary_sensor\",";
+        return haBinaryAsNumber ? "\"p\":\"binary_sensor\",\"pl_on\":\"1\",\"pl_off\":\"0\"," : "\"p\":\"binary_sensor\",";
     }
 
     // "Flow sensor (l/min)"
@@ -159,10 +274,10 @@ std::string getSensorDeviceAndUnit(const LabelDef &label)
         return "\"p\":\"sensor\",\"dev_cla\":\"current\",\"unit_of_meas\":\"A\",";
     }
 
-    // Fan speed (rotations per second).
+    // Compressor and fan speeds, in rotations per second (no device class: Home Assistant's "frequency" only takes Hz).
     if (label.convid == 152 && strstr(label.label, "(rps)") != NULL)
     {
-        return "\"p\":\"sensor\",\"dev_cla\":\"frequency\",\"unit_of_meas\":\"Hz\",";
+        return "\"p\":\"sensor\",\"unit_of_meas\":\"rps\",";
     }
 
     return "\"p\":\"sensor\",";
