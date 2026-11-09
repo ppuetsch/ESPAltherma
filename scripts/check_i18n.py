@@ -86,7 +86,7 @@ class Strings(HTMLParser):
 
 def script_strings(source):
     out = []
-    for script in re.findall(r"<script>(.*?)</script>", source, re.S):
+    for script in re.findall(r"<script>(.*?)</script>", source, re.S | re.I):
         for m in re.finditer(r"\b(?:t|N_)\('((?:[^'\\]|\\.)*)'", script):
             out.append(norm(m.group(1).replace("\\'", "'").replace("\\\\", "\\")))
     return out
