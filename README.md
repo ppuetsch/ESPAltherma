@@ -206,32 +206,8 @@ Once the MQTT broker is set ([Step 3](#step-3-finishing-in-the-web-interface)), 
 The [ESPAltherma card](https://github.com/raomin/espaltherma-card) brings the live drawing of the web page to Home Assistant, and builds a whole dashboard with the drawing, your thermostat, the key values and their history. Install it with HACS (custom repository `https://github.com/raomin/espaltherma-card`, type *Dashboard*), then create a dashboard whose configuration is just:
 
 ```yaml
-<<<<<<< HEAD
-template:
-  - unique_id: "espaltherma"  # will be prefixed to all unique IDs
-    sensor:
-    - name: "Operation mode"
-      unique_id: "operation"
-      state: "{{ state_attr('sensor.althermasensors','Operation Mode') }}"
-    - name: "Indoor Operation mode"
-      unique_id: "iuoperation"
-      state: "{{ state_attr('sensor.althermasensors','I/U operation mode') }}"
-    - name: "DHW Temp"
-      unique_id: "dhw"
-      state: "{{ state_attr('sensor.althermasensors','DHW tank temp. (R5T)') }}"
-      device_class: temperature
-      state_class: measurement
-      unit_of_measurement: '°C'
-    - name: "Inverter primary current"
-      unique_id: "inv_primary_current"
-      state: "{{ state_attr('sensor.althermasensors','INV primary current (A)') }}"
-      unit_of_measurement: 'A'
-      device_class: current
-      state_class: measurement
-=======
 strategy:
   type: custom:espaltherma
->>>>>>> refs/remotes/raomin/beta
 ```
 
 The rest is in [doc/home-assistant.md](doc/home-assistant.md): the discovery details and how to clear it, a climate entity on the thermostat relay, calculating the COP, the MQTT topics, one topic per value for OpenHAB and the like, and two boards on one broker.
