@@ -10,9 +10,9 @@
 struct HaSnapshotLabel
 {
   const char *label, *name;
-  int16_t convid, dataType;
+  int16_t convid, dataType, registryID;
   bool extra;
-  LabelDef definition() const {LabelDef d(-1,-1,convid,-1,dataType,label);d.name=name;return d;}
+  LabelDef definition() const {LabelDef d(registryID,-1,convid,-1,dataType,label);d.name=name;return d;}
 };
 
 struct HaDiscoverySnapshot
@@ -29,7 +29,7 @@ struct HaDiscoverySnapshot
     for (size_t i=0;i<n+extraCount;i++)
     {
       const LabelDef &d=i<n?selected[i]:extras[i-n];
-      next[i]={d.label,d.name,(int16_t)d.convid,(int16_t)d.dataType,i>=n};
+      next[i]={d.label,d.name,(int16_t)d.convid,(int16_t)d.dataType,(int16_t)d.registryID,i>=n};
     }
     strncpy(model,deviceModel,sizeof(model)-1);model[sizeof(model)-1]=0;
     labels=std::move(next);count=n+extraCount;
@@ -54,7 +54,7 @@ bool publishOneValueSnapshots(LabelDef *&labels,size_t &count,const char *regs,c
     if (generation!=started || i>=count) {bool done=generation==started;unlock();return done;}
     const LabelDef &d=labels[i];
     for(size_t r=0;r<32 && (uint8_t)regs[r]!=0xFF;r++)
-      if ((uint8_t)d.registryID==(uint8_t)regs[r] && ok[r]) {selected=true;break;}
+      if ((uint8_t)d.registryID==(uint8_t)regs[r] && ok[r] && d.valid) {selected=true;break;}
     if (selected)
     {
       reading.label=d.label;memcpy(reading.value,d.asString,sizeof(reading.value));

@@ -15,6 +15,8 @@ void test_discovery_snapshot_matches_existing_bytes_and_survives_source_reload_m
     std::vector<HaComponent> removed={{"old_sensor","sensor"}};
     std::string legacy;streamDeviceDiscoveryPayload(selected.data(),selected.size(),append,&legacy,&removed);
     HaDiscoverySnapshot snapshot;TEST_ASSERT_TRUE(snapshot.capture(selected.data(),selected.size(),extras.data(),extras.size(),model));
+    TEST_ASSERT_EQUAL(0x20,snapshot.labels[0].definition().registryID);
+    TEST_ASSERT_EQUAL(-1,snapshot.labels[2].definition().registryID);
     size_t measured=streamDeviceDiscoverySnapshot(snapshot,nullptr,nullptr,&removed);
     struct Context {std::string output;std::vector<LabelDef> *selected,*extras;bool changed=false;char *model;};
     Context context;context.selected=&selected;context.extras=&extras;context.model=model;
@@ -36,6 +38,7 @@ void test_one_value_sink_runs_without_lock_and_owns_its_copied_value()
 {
     LabelDef defs[]={{0x20,0,105,2,1,"out"},{0x30,0,152,1,-1,"inv"}};
     strcpy(defs[0].asString,"2");strcpy(defs[1].asString,"40");
+    defs[0].valid=defs[1].valid=true;
     LabelDef *labels=defs;size_t count=2;char regs[32]={0x20,0x30,(char)0xFF};bool ok[32]={true,false};uint32_t generation=1;
     bool locked=false;int sent=0;
     TEST_ASSERT_TRUE(publishOneValueSnapshots(labels,count,regs,ok,generation,[&](){TEST_ASSERT_FALSE(locked);locked=true;},[&](){TEST_ASSERT_TRUE(locked);locked=false;},[&](const MqttReading &r){
@@ -48,6 +51,7 @@ void test_label_reload_during_publish_stops_without_reading_freed_selection()
 {
     std::vector<LabelDef> defs={{0x20,0,105,2,1,"out"},{0x20,8,105,2,1,"coil"}};
     strcpy(defs[0].asString,"2");LabelDef *labels=defs.data();size_t count=defs.size();uint32_t generation=1;
+    defs[0].valid=defs[1].valid=true;
     char regs[32]={0x20,(char)0xFF};bool ok[32]={true};bool locked=false;int sent=0;
     TEST_ASSERT_FALSE(publishOneValueSnapshots(labels,count,regs,ok,generation,[&](){locked=true;},[&](){locked=false;},[&](const MqttReading &){
         TEST_ASSERT_FALSE(locked);defs.clear();defs.shrink_to_fit();labels=nullptr;count=0;generation++;sent++;
@@ -60,4 +64,12 @@ void test_snapshot_rejects_invalid_or_unbounded_sources()
     TEST_ASSERT_FALSE(snapshot.capture(nullptr,1,nullptr,0,"x"));
     TEST_ASSERT_TRUE(snapshot.capture(nullptr,0,nullptr,0,"x"));TEST_ASSERT_EQUAL(0,snapshot.count);
 }
-int main(int,char**){UNITY_BEGIN();RUN_TEST(test_discovery_snapshot_matches_existing_bytes_and_survives_source_reload_mid_send);RUN_TEST(test_one_value_sink_runs_without_lock_and_owns_its_copied_value);RUN_TEST(test_label_reload_during_publish_stops_without_reading_freed_selection);RUN_TEST(test_snapshot_rejects_invalid_or_unbounded_sources);return UNITY_END();}
+void test_missing_field_is_skipped_even_when_its_register_poll_succeeded()
+{
+    LabelDef defs[]={{0,9,152,1,-1,"present"},{0,10,152,1,-1,"missing"}};
+    defs[0].valid=true;defs[1].valid=false;strcpy(defs[0].asString,"1");strcpy(defs[1].asString,"old value");
+    LabelDef *labels=defs;size_t count=2;uint32_t generation=1;char regs[32]={0,(char)0xFF};bool ok[32]={true};int sent=0;
+    TEST_ASSERT_TRUE(publishOneValueSnapshots(labels,count,regs,ok,generation,[](){},[](){},[&](const MqttReading &r){sent++;TEST_ASSERT_EQUAL_STRING("present",r.label);}));
+    TEST_ASSERT_EQUAL(1,sent);
+}
+int main(int,char**){UNITY_BEGIN();RUN_TEST(test_discovery_snapshot_matches_existing_bytes_and_survives_source_reload_mid_send);RUN_TEST(test_one_value_sink_runs_without_lock_and_owns_its_copied_value);RUN_TEST(test_label_reload_during_publish_stops_without_reading_freed_selection);RUN_TEST(test_snapshot_rejects_invalid_or_unbounded_sources);RUN_TEST(test_missing_field_is_skipped_even_when_its_register_poll_succeeded);return UNITY_END();}
