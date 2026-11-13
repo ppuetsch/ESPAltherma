@@ -221,6 +221,15 @@ def c_string(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def duplicate_locations(entries):
+    """A name is a MQTT key/HA id: two offsets or converters in one page still collide."""
+    locations = collections.defaultdict(set)
+    for reg, offset, conv, size, dtype, label in entries:
+        if label not in NOT_RENAMED:
+            locations[label].add((reg, offset, conv, size))
+    return {name: sorted(found) for name, found in locations.items() if len(found) > 1}
+
+
 # Sensor names in other languages, from the translated definition files (definitions/<Language>/). They are
 # line-by-line translations of the English files: each English name gets the translation found most often.
 # Only the names shown in Home Assistant and the web interface change; the MQTT keys and ids stay English.
@@ -329,12 +338,9 @@ def build():
         if expected != rebuilt:
             raise SystemExit("gen_catalog: round trip failed for %s" % f)
         # One name, one value: the name is the MQTT key and the Home Assistant id
-        regs = collections.defaultdict(set)
-        for reg, offset, conv, size, dtype, label in rebuilt:
-            regs[label].add(reg)
-        clash = sorted(label for label, found in regs.items() if len(found) > 1 and label not in NOT_RENAMED)
-        if FAMILIES[f] not in "SR" and clash:
-            raise SystemExit("gen_catalog: %s has %s in several registries" % (f, clash))
+        clash = duplicate_locations(rebuilt)
+        if clash:
+            raise SystemExit("gen_catalog: %s has names at several locations: %s" % (f, clash))
 
     labels = {}
     pool = []
@@ -448,4 +454,5 @@ def main():
         print("gen_catalog: include/catalog_data.h updated")
 
 
-main()
+if __name__ == "__main__" or "env" in globals():  # also executed by PlatformIO/SCons
+    main()
