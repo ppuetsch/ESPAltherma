@@ -29,6 +29,8 @@ jobs:
           node-version: "22"
       - name: Explicit defrost report validation
         run: node --test telemetry/test/*.test.js
+      - name: Web behavior regression tests
+        run: node --test test/web/*.test.cjs
 
   firmware:
     runs-on: ubuntu-latest

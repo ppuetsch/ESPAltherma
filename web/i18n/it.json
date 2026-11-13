@@ -499,5 +499,8 @@
  "Project telemetry is not configured in this build.": "La telemetria del progetto non è configurata in questa versione.",
  "Sending report…": "Invio del rapporto…",
  "Report sent.": "Rapporto inviato.",
- "Report failed. Download the case or try again.": "Invio non riuscito. Scarica il caso o riprova."
+ "Report failed. Download the case or try again.": "Invio non riuscito. Scarica il caso o riprova.",
+ "Statistics UTC offset (minutes)": "Scostamento UTC delle statistiche (minuti)",
+ "Use this browser's offset": "Usa lo scostamento di questo browser",
+ "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Scostamento UTC fisso per le statistiche giornaliere. Aggiornalo al cambio dell’ora legale, poi salva le impostazioni."
 }

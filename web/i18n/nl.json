@@ -499,5 +499,8 @@
  "Project telemetry is not configured in this build.": "Projecttelemetrie is niet ingesteld in deze firmware.",
  "Sending report…": "Rapport wordt verzonden…",
  "Report sent.": "Rapport verzonden.",
- "Report failed. Download the case or try again.": "Verzenden mislukt. Download het geval of probeer opnieuw."
+ "Report failed. Download the case or try again.": "Verzenden mislukt. Download het geval of probeer opnieuw.",
+ "Statistics UTC offset (minutes)": "UTC-afwijking voor statistieken (minuten)",
+ "Use this browser's offset": "Afwijking van deze browser gebruiken",
+ "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Vaste UTC-afwijking voor dagstatistieken. Pas deze aan bij zomer- of wintertijd en sla de instellingen op."
 }

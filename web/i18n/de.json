@@ -499,5 +499,8 @@
  "Project telemetry is not configured in this build.": "Die Projekt-Telemetrie ist in dieser Firmware nicht eingerichtet.",
  "Sending report…": "Bericht wird gesendet…",
  "Report sent.": "Bericht gesendet.",
- "Report failed. Download the case or try again.": "Versand fehlgeschlagen. Lade den Fall herunter oder versuche es erneut."
+ "Report failed. Download the case or try again.": "Versand fehlgeschlagen. Lade den Fall herunter oder versuche es erneut.",
+ "Statistics UTC offset (minutes)": "UTC-Abweichung der Statistik (Minuten)",
+ "Use this browser's offset": "UTC-Abweichung dieses Browsers übernehmen",
+ "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Feste UTC-Abweichung für die Tagesstatistik. Bei der Zeitumstellung anpassen und anschließend die Einstellungen speichern."
 }
