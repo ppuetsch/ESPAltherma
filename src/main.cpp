@@ -9,6 +9,7 @@
 
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
+#include <atomic>
 
 // No compile time settings: everything is configured at runtime (web interface, stored in NVS).
 #include "labeldef.h"
@@ -52,7 +53,7 @@ int32_t sensorAge(const LabelDef &l, uint32_t now)
 {
   return valueQualityTracker.ageSeconds((uint8_t)l.registryID, now);
 }
-bool busy = false;
+std::atomic<bool> busy{false}; // OTA/main task publishes the gate; the heat-pump task observes it
 
 Survey survey;
 char surveyJson[3072];
