@@ -830,6 +830,8 @@ struct LimitControl : X10aClient
   float applied = -1;         // last limit written, for the caller's log (-1 when none since the last read)
   bool released = false;      // switched off since the last read, for the caller's log
   unsigned long checkedAt = 0, readAt = 0, wroteAt = 0;
+  unsigned long retryAfter = CONTROL_RETRY_FIRST_MS;
+  bool identificationTried = false;
 
   void reset()
   {
@@ -843,12 +845,16 @@ struct LimitControl : X10aClient
     wanted = -1;
     wantedOn = -1;
     checkedAt = 0;
+    retryAfter = CONTROL_RETRY_FIRST_MS;
+    identificationTried = false;
     changed = true;
   }
 
   // Reads the software version, checks the profile and reads the limitation state. True when ready.
   bool identify(unsigned long now)
   {
+    bool retrying = identificationTried && status != CONTROL_READY;
+    identificationTried = true;
     checkedAt = now;
     ControlStatus before = status;
     if (!readSoftwareId(softwareId))
@@ -874,6 +880,7 @@ struct LimitControl : X10aClient
     }
     if (status != before)
       changed = true;
+    retryAfter = status == CONTROL_READY || !retrying ? CONTROL_RETRY_FIRST_MS : CurveControl::nextRetry(retryAfter);
     return status == CONTROL_READY;
   }
 
@@ -1004,7 +1011,8 @@ struct LimitControl : X10aClient
   {
     if (status != CONTROL_READY)
     {
-      if (now - checkedAt >= CONTROL_CHECK_INTERVAL_MS || checkedAt == 0)
+      // X10A may answer before the unit has finished starting. Retry soon, then back off like the targets.
+      if (!identificationTried || now - checkedAt >= retryAfter)
         identify(now);
       return;
     }
