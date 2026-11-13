@@ -841,28 +841,7 @@ static const LabelDef UNIT_MODEL_LABEL = {-1, -1, -1, -1, ESP_SENSOR_TEXT, "Unit
 
 // The statistics, the DIII values and the unit's meter share the one list of extra Home Assistant sensors. The
 // DIII ones only once the reader found its outdoor unit, the meter once read (no empty sensors on the other units).
-void haExtraSetup()
-{
-  static LabelDef extra[HA_EXTRA_LABELS_MAX];
-  size_t n = 0;
-  if (config.statsEnabled)
-    for (const LabelDef &l : STATS_LABELS)
-      extra[n++] = l;
-  if (diii.status == DIII_READY)
-    for (const LabelDef &l : DIII_LABELS)
-      extra[n++] = l;
-  if (unitMeter.status == CONTROL_READY)
-    extra[n++] = METER_LABEL;
-  if (unitMeter.model[0])
-    extra[n++] = UNIT_MODEL_LABEL;
-  static_assert(sizeof(STATS_LABELS) / sizeof(STATS_LABELS[0]) + sizeof(DIII_LABELS) / sizeof(DIII_LABELS[0]) + 2 + UNIT_COUNTER_COUNT <= HA_EXTRA_LABELS_MAX, "room for the unit's counters");
-  for (size_t i = 0; unitMeter.status == CONTROL_READY && i < UNIT_COUNTER_COUNT; i++)
-    if (unitMeter.counterMapped(i))
-      extra[n++] = LabelDef(-1, -1, -1, -1, unitCounterSensorType(UNIT_COUNTER_DEFS[i]), UNIT_COUNTER_DEFS[i].label);
-  haExtraCount = 0; // the main loop may be reading the list
-  haExtraLabels = n ? extra : nullptr;
-  haExtraCount = n;
-}
+#include "haextras.h"
 
 // The DIII values as ATTR keys (mqtt.h, next to the statistics)
 void diiiAppendJson(char *buf, size_t size)
