@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cctype>
 #include <homeassistant.h>
+#include "version.h"
 
 // The device and the topics come from the configurable base topic (topics.h); set by setupMqttClient()
 const char *haIdPrefix = "espaltherma";
@@ -11,12 +12,16 @@ const char *haDeviceModel = "Altherma";
 const char *haAttrTopic = "espaltherma/ATTR";
 const char *haLwtTopic = "espaltherma/LWT";
 unsigned long haValueExpirySeconds = 90;
+const char *haHostname = "ESPAltherma";
+static std::string jsonEscape(const char *s);
 
 static std::string discoveryStart(const char *model)
 {
+    const std::string url=std::string("http://")+haHostname+".local/";
     return std::string("{\"dev\":{\"ids\":\"") + haDeviceId + "\",\"name\":\"" + haDeviceName +
-           "\",\"mf\":\"Daikin\",\"mdl\":\"" + model + "\"},\"o\":{\"name\":\"" + haDeviceId +
-           "\",\"sw\":\"0.1\",\"url\":\"https://github.com/raomin/ESPAltherma/\"},\"cmps\":{";
+           "\",\"mf\":\"Daikin\",\"mdl\":\"" + model + "\",\"sw_version\":\"ESPAltherma " ESPALTHERMA_VERSION
+           "\",\"configuration_url\":\"" + jsonEscape(url.c_str()) + "\"},\"o\":{\"name\":\"" + haDeviceId +
+           "\",\"sw\":\"" ESPALTHERMA_VERSION "\",\"url\":\"https://github.com/raomin/ESPAltherma/\"},\"cmps\":{";
 }
 
 static std::string discoveryEnd()

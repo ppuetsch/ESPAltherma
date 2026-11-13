@@ -15,6 +15,7 @@ extern const char *haDeviceModel; // its model: the unit's own name once read, "
 extern const char *haAttrTopic;  // the topic of the readings
 extern const char *haLwtTopic;
 extern unsigned long haValueExpirySeconds;
+extern const char *haHostname;   // web configuration URL; main-loop settings application owns the string
 
 /*
  * Sink callback used to stream the Device Discovery payload one chunk at a time.
