@@ -370,7 +370,7 @@ void reloadLabels()
   valuesLock();
   initLabels();
   initRegistries();
-  memset(registryOk, 0, sizeof(registryOk));
+  for (auto &ok : registryOk) ok.store(false);
   valueQualityTracker.reset();
   valuesUnlock();
   discoveryDirty = true;
