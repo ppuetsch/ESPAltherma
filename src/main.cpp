@@ -1395,31 +1395,7 @@ static void memoryDumpTick()
   }
 }
 
-void controlLoop()
-{
-  controlTick(dhwControl, config.dhwTarget, "Hot water");
-  controlTick(lwtControl, config.lwtTarget, "Leaving water");
-  limitTick();
-  meterTick();
-  memoryTick();
-  memoryDumpTick();
-  heldSaveTick();
-  // Only on the HT outdoor unit: the hydrobox ports and the other units are never read by it
-  bool diiiOn = config.protocol == 'I' && strstr(config.model, "ERRQ-ERSQ outdoor") != nullptr;
-  DiiiStatus before = diii.status;
-  if (!diiiOn)
-  {
-    if (diii.status != DIII_OFF)
-      diii.reset();
-  }
-  else if (!busy)
-    diii.tick();
-  if ((before == DIII_READY) != (diii.status == DIII_READY))
-  {
-    haExtraSetup(); // its sensors join (or leave) the Home Assistant discovery
-    discoveryDirty = true;
-  }
-}
+#include "hpcontrol.h"
 
 // Owns the X10A link: runs the survey on request and queries the registries every config.frequency ms.
 void hpTask(void *)
@@ -1457,7 +1433,6 @@ void hpTask(void *)
     while (millis() - start < wait && !surveyRequested && !labelsDirty)
     {
       watchdogHp();
-      HP_STAGE("hot water target");
       controlLoop();
       defrostPoll(false);
       HP_STAGE("wait");
