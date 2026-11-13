@@ -145,10 +145,10 @@ void updateValues(char regID)
 
     if (alpha){
 
-      snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":\"%s\",", labels[i]->label, v);
+      mqttJsonAppend(jsonbuff,MAX_MSG_SIZE,mqttValuesOverflow,"\"%s\":\"%s\",",labels[i]->label,v);
     }
     else{//number, no quotes
-      snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%s,", labels[i]->label, v);
+      mqttJsonAppend(jsonbuff,MAX_MSG_SIZE,mqttValuesOverflow,"\"%s\":%s,",labels[i]->label,v);
     }
   }
 }

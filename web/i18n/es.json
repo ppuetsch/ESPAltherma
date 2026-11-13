@@ -502,5 +502,6 @@
  "Report failed. Download the case or try again.": "Error de envío. Descarga el caso o vuelve a intentarlo.",
  "Statistics UTC offset (minutes)": "Desfase UTC de estadísticas (minutos)",
  "Use this browser's offset": "Usar el desfase de este navegador",
- "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Desfase UTC fijo para las estadísticas diarias. Actualízalo al cambiar el horario de verano y guarda los ajustes."
+ "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Desfase UTC fijo para las estadísticas diarias. Actualízalo al cambiar el horario de verano y guarda los ajustes.",
+ "MQTT values exceeded the payload buffer. Select fewer readings or use one topic per value in Settings.": "Los valores MQTT superan el búfer del mensaje. Selecciona menos lecturas o usa un tema por valor en Ajustes."
 }

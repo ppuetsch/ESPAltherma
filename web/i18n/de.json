@@ -502,5 +502,6 @@
  "Report failed. Download the case or try again.": "Versand fehlgeschlagen. Lade den Fall herunter oder versuche es erneut.",
  "Statistics UTC offset (minutes)": "UTC-Abweichung der Statistik (Minuten)",
  "Use this browser's offset": "UTC-Abweichung dieses Browsers übernehmen",
- "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Feste UTC-Abweichung für die Tagesstatistik. Bei der Zeitumstellung anpassen und anschließend die Einstellungen speichern."
+ "Fixed UTC offset for daily statistics. Update it when daylight saving time changes, then save settings.": "Feste UTC-Abweichung für die Tagesstatistik. Bei der Zeitumstellung anpassen und anschließend die Einstellungen speichern.",
+ "MQTT values exceeded the payload buffer. Select fewer readings or use one topic per value in Settings.": "Die MQTT-Werte überschreiten den Nachrichtenspeicher. Wähle weniger Messwerte oder aktiviere in den Einstellungen ein Topic pro Wert."
 }
