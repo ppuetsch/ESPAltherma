@@ -42,8 +42,8 @@ struct MqttReading {const char *label;char value[sizeof(LabelDef::asString)];};
 
 // Each publish owns just one copied reading. A label reload ends this pass, avoiding dangling pointers
 // and a mixed selection. Lock/unlock encompass only the copy; the sink can block without stopping X10A.
-template<typename Lock,typename Unlock,typename Sink>
-bool publishOneValueSnapshots(LabelDef *&labels,size_t &count,const char *regs,const bool *ok,
+template<typename Result,typename Lock,typename Unlock,typename Sink>
+bool publishOneValueSnapshots(LabelDef *&labels,size_t &count,const char *regs,const Result *ok,
                              const uint32_t &generation,Lock lock,Unlock unlock,Sink sink)
 {
   lock();uint32_t started=generation;unlock();

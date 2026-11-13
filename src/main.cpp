@@ -43,7 +43,7 @@
 
 ::Converter converter; // qualified: ArduinoJson (via ESPAsyncWebServer) also has a Converter
 char registryIDs[32]; //Holds the registries to query
-bool registryOk[32]; //Registries successfully read during the last query cycle
+std::atomic<bool> registryOk[32]; // polling task publishes results while MQTT reads them
 ValueQualityTracker valueQualityTracker;
 ValueQuality sensorQuality(const LabelDef &l, uint32_t now)
 {

@@ -1,6 +1,7 @@
 #include <unity.h>
 #include <ArduinoJson.h>
 #include <vector>
+#include <atomic>
 #include <string>
 #include "../../src/homeassistant.cpp" // production serializers, without Arduino/network dependencies
 void setUp(){haExtraLabels=nullptr;haExtraCount=0;haBinaryAsNumber=false;haDeviceModel="Altherma";}
@@ -39,7 +40,7 @@ void test_one_value_sink_runs_without_lock_and_owns_its_copied_value()
     LabelDef defs[]={{0x20,0,105,2,1,"out"},{0x30,0,152,1,-1,"inv"}};
     strcpy(defs[0].asString,"2");strcpy(defs[1].asString,"40");
     defs[0].valid=defs[1].valid=true;
-    LabelDef *labels=defs;size_t count=2;char regs[32]={0x20,0x30,(char)0xFF};bool ok[32]={true,false};uint32_t generation=1;
+    LabelDef *labels=defs;size_t count=2;char regs[32]={0x20,0x30,(char)0xFF};std::atomic<bool> ok[32];ok[0]=true;ok[1]=false;uint32_t generation=1;
     bool locked=false;int sent=0;
     TEST_ASSERT_TRUE(publishOneValueSnapshots(labels,count,regs,ok,generation,[&](){TEST_ASSERT_FALSE(locked);locked=true;},[&](){TEST_ASSERT_TRUE(locked);locked=false;},[&](const MqttReading &r){
         TEST_ASSERT_FALSE(locked);strcpy(defs[0].asString,"changed during network write");
