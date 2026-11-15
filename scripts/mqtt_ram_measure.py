@@ -89,6 +89,7 @@ def measure(board: str, broker: str, image: Path, settle_seconds: int) -> Json:
         "values": status["hp"]["values"],
         "heap": heap_at_rest(board),
         "topics": published_topics(broker),
+        "values_message": get_json(broker, "/api/repro/broker/values"),
     }
 
 
