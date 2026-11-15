@@ -1334,6 +1334,9 @@ void setupPins()
 
 void setup()
 {
+#ifdef REPRO_663
+  reproBegin();
+#endif
   restartCauseLoad();
   eventBegin();
   eventAddf("Boot #%u: %s, firmware %s", eventBoot, resetReasonName(), ESPALTHERMA_VERSION);

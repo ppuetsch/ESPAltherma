@@ -30,6 +30,9 @@ extern volatile bool surveyRequested;
 extern volatile bool surveyInProgress;
 #include "stats.h"
 #include "fwupdate.h"
+#ifdef REPRO_663
+#include "repro663.h"
+#endif
 extern Stats stats;
 bool memoryRequest(uint16_t addr, uint8_t len); // main.cpp: the heat pump task reads the hydro board's memory
 void memoryResult(JsonDocument &doc);
@@ -991,6 +994,9 @@ void webBegin()
     r->send(404, "text/plain", "Not found");
   });
 
+#ifdef REPRO_663
+  reproRoutes(webServer);
+#endif
   webServer.addHandler(&webEvents);
   webServer.begin();
 }

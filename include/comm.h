@@ -4,7 +4,12 @@
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
+#ifdef REPRO_663
+#include "repro663_unit.h"
+FakeUnitSerial MySerial; // no heat pump on this board: one in the firmware
+#else
 HardwareSerial MySerial(1);
+#endif
 #define SERIAL_CONFIG (SERIAL_8E1)
 #define SERIAL_FLUSH_TX_ONLY false
 #define SER_TIMEOUT 300 //leave 300ms for the machine to answer
