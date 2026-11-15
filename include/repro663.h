@@ -159,6 +159,42 @@ static void ballastHoldUntilFree(uint32_t wantedFree)
   }
 }
 
+// ------------------------------------------------------------------------- where the memory is at its lowest
+
+// The heap's own low-water mark cannot be set back and does not say who took the memory: a task samples the free
+// data heap every 2 ms and keeps the lowest figure with the step the main loop was in (stage.h), until asked to
+// start again (/api/repro/heap?restart=1).
+#define HEAP_SAMPLE_EVERY_MS 2
+extern volatile const char *loopStage;
+static volatile uint32_t sampledLowestFree = UINT32_MAX, sampledLowestBlock = 0, sampledLowestAtMs = 0;
+static volatile const char *sampledLowestStage = "";
+
+static void heapSamplerRestart()
+{
+  sampledLowestFree = UINT32_MAX;
+}
+
+static void heapSamplerTask(void *)
+{
+  for (;;)
+  {
+    uint32_t freeNow = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (freeNow < sampledLowestFree)
+    {
+      sampledLowestFree = freeNow;
+      sampledLowestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      sampledLowestStage = loopStage;
+      sampledLowestAtMs = millis();
+    }
+    vTaskDelay(pdMS_TO_TICKS(HEAP_SAMPLE_EVERY_MS));
+  }
+}
+
+static void heapSamplerBegin()
+{
+  xTaskCreate(heapSamplerTask, "heapsampler", 3072, nullptr, configMAX_PRIORITIES - 2, nullptr);
+}
+
 // ----------------------------------------------------------------------- the allocations that found no room
 
 struct FailedAllocation
@@ -337,6 +373,11 @@ static void reproHeapJson(JsonDocument &doc)
   doc["total"] = heap_caps_get_total_size(MALLOC_CAP_8BIT);
   doc["ballast"] = ballastPieces.size() * BALLAST_PIECE_BYTES;
   doc["uptime_ms"] = millis();
+  JsonObject sampled = doc["sampled"].to<JsonObject>();
+  sampled["lowest"] = sampledLowestFree;
+  sampled["block"] = sampledLowestBlock;
+  sampled["stage"] = (const char *)sampledLowestStage;
+  sampled["at_ms"] = sampledLowestAtMs;
   failedAllocationsToJson(failedAllocations, doc["failed"].to<JsonObject>());
   failedAllocationsToJson(failedAllocationsOfPreviousBoot, doc["failed_previous_boot"].to<JsonObject>());
 }
@@ -345,6 +386,8 @@ static void reproSendHeap(AsyncWebServerRequest *request)
 {
   JsonDocument doc;
   reproHeapJson(doc);
+  if (request->hasParam("restart"))
+    heapSamplerRestart(); // after the figures are taken: the answer itself costs memory
   String body;
   serializeJson(doc, body);
   request->send(200, "application/json", body);
@@ -385,6 +428,7 @@ void reproRoutes(AsyncWebServer &server)
   server.on("/api/repro/coredump", HTTP_GET, reproSendCoreDump);
   server.on("/api/repro/broker", HTTP_GET, brokerSendCounts);
   brokerBegin();
+  heapSamplerBegin();
 }
 
 #endif
