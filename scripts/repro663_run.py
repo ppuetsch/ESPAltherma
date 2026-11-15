@@ -48,6 +48,8 @@ class BoardState:
     lowest_free_bytes: int
     largest_block_bytes: int
     ballast_bytes: int
+    sampled_lowest_bytes: int
+    sampled_lowest_stage: str
     failed_allocations: Json
     failed_allocations_previous_boot: Json
 
@@ -60,9 +62,9 @@ def get_json(board: str, path: str) -> Json:
         return json.load(response)
 
 
-def read_board_state(board: str) -> BoardState:
+def read_board_state(board: str, restart_sampling: bool = False) -> BoardState:
     status = get_json(board, "/api/status")
-    heap = get_json(board, "/api/repro/heap")
+    heap = get_json(board, "/api/repro/heap?restart=1" if restart_sampling else "/api/repro/heap")
     return BoardState(
         uptime_seconds=int(status["uptime"]),
         reset_reason=str(status["reset_reason"]),
@@ -70,6 +72,8 @@ def read_board_state(board: str) -> BoardState:
         lowest_free_bytes=int(heap["lowest"]),
         largest_block_bytes=int(heap["block"]),
         ballast_bytes=int(heap["ballast"]),
+        sampled_lowest_bytes=int(heap["sampled"]["lowest"]),
+        sampled_lowest_stage=str(heap["sampled"]["stage"]),
         failed_allocations=heap["failed"],
         failed_allocations_previous_boot=heap["failed_previous_boot"],
     )
@@ -123,14 +127,22 @@ def start_listeners(board: str, count: int) -> list[EventStreamListener]:
     return listeners
 
 
-def wait_for_the_moment_in_the_poll_cycle(listeners: list[EventStreamListener], seconds_after_values_event: int | None) -> None:
+def seconds_since_last_poll(board: str) -> int:
+    return int(get_json(board, "/api/status")["hp"]["last_poll"])
+
+
+def wait_for_the_moment_in_the_poll_cycle(board: str, listeners: list[EventStreamListener], seconds_after_values_event: int | None) -> None:
     """A poll every 30 s and an upload of 12 s meet by chance only: start a chosen time after the last values went out."""
-    if seconds_after_values_event is None or not listeners:
+    if seconds_after_values_event is None:
         return
-    seen = listeners[0].values_events
     deadline = time.monotonic() + VALUES_EVENT_TIMEOUT_SECONDS
-    while listeners[0].values_events == seen and time.monotonic() < deadline:
-        time.sleep(0.05)
+    if listeners:
+        seen = listeners[0].values_events
+        while listeners[0].values_events == seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+    else:
+        while seconds_since_last_poll(board) > 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
     time.sleep(seconds_after_values_event)
 
 
@@ -154,6 +166,7 @@ def upload(board: str, image: Path) -> str:
 def describe(label: str, state: BoardState) -> str:
     return (f"{label}: uptime {state.uptime_seconds} s, free {state.free_bytes}, lowest {state.lowest_free_bytes}, "
             f"largest block {state.largest_block_bytes}, held back {state.ballast_bytes}, "
+            f"sampled lowest {state.sampled_lowest_bytes} in '{state.sampled_lowest_stage}', "
             f"failed allocations {state.failed_allocations['total']}")
 
 
@@ -161,8 +174,8 @@ def run(experiment: Experiment) -> None:
     hold_back_memory(experiment.board, experiment.wanted_free_bytes)
     listeners = start_listeners(experiment.board, experiment.listeners)
     time.sleep(experiment.settle_seconds)
-    wait_for_the_moment_in_the_poll_cycle(listeners, experiment.seconds_after_values_event)
-    before = read_board_state(experiment.board)
+    wait_for_the_moment_in_the_poll_cycle(experiment.board, listeners, experiment.seconds_after_values_event)
+    before = read_board_state(experiment.board, restart_sampling=True)
     print(describe("before", before))
 
     image = image_the_board_will_refuse(experiment.firmware) if experiment.keep_board_on_its_firmware else experiment.firmware
