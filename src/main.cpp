@@ -73,7 +73,16 @@ static void diiiLog(const char *s) { mqttSerial.print(s); }
 
 // The heat pump task converts values while the main loop publishes them.
 SemaphoreHandle_t valuesMutex = xSemaphoreCreateMutex();
+#ifdef REPRO_663
+void valuesLock()
+{
+  uint32_t askedAt = micros();
+  xSemaphoreTake(valuesMutex, portMAX_DELAY);
+  reproLockWaited(micros() - askedAt);
+}
+#else
 void valuesLock() { xSemaphoreTake(valuesMutex, portMAX_DELAY); }
+#endif
 void valuesUnlock() { xSemaphoreGive(valuesMutex); }
 volatile bool cycleReady = false;
 

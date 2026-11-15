@@ -256,7 +256,54 @@ static void failedAllocationsToJson(const FailedAllocationLog &log, JsonObject o
   }
 }
 
+// --------------------------------------------------------------------- the wait for the values lock, per task
+
+// How long the heat pump task and the main loop wait for the values lock (main.cpp valuesLock): the figure asked for
+// in #680, where a slow broker keeps the main loop inside the lock.
+struct LockWait
+{
+  volatile uint32_t takes, waitedMicros, longestMicros;
+};
+static LockWait lockWaitHeatPump, lockWaitLoop;
+
+void reproLockWaited(uint32_t waitedMicros)
+{
+  const char *task = pcTaskGetName(nullptr);
+  bool heatPumpTask = task != nullptr && strcmp(task, "heatpump") == 0;
+  LockWait &wait = heatPumpTask ? lockWaitHeatPump : lockWaitLoop;
+  wait.takes = wait.takes + 1;
+  wait.waitedMicros = wait.waitedMicros + waitedMicros;
+  if (waitedMicros > wait.longestMicros)
+    wait.longestMicros = waitedMicros;
+}
+
+static void lockWaitToJson(const LockWait &wait, JsonObject out)
+{
+  out["takes"] = wait.takes;
+  out["waited_ms"] = wait.waitedMicros / 1000;
+  out["longest_ms"] = wait.longestMicros / 1000;
+}
+
+static void reproSendLockWait(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  doc["uptime_ms"] = millis();
+  lockWaitToJson(lockWaitHeatPump, doc["heat_pump_task"].to<JsonObject>());
+  lockWaitToJson(lockWaitLoop, doc["other_tasks"].to<JsonObject>());
+  if (request->hasParam("restart"))
+  {
+    lockWaitHeatPump = LockWait{0, 0, 0};
+    lockWaitLoop = LockWait{0, 0, 0};
+  }
+  String body;
+  serializeJson(doc, body);
+  request->send(200, "application/json", body);
+}
+
 // ------------------------------------------------------------------------------------- the broker next door
+
+// A slow broker: each piece of data it receives is taken this many milliseconds late (/api/repro/broker?slow_ms=N)
+static volatile uint32_t brokerSlowMs = 0;
 
 // The second bare board takes what the first one publishes: enough of MQTT 3.1.1 for PubSubClient (CONNECT,
 // SUBSCRIBE, PINGREQ, QoS 0 PUBLISH). Nothing is forwarded; the bytes are counted for /api/repro/broker.
@@ -435,6 +482,8 @@ static void brokerBegin()
     BrokerConnection *connection = new BrokerConnection();
     brokerConnections++;
     board->onData([connection](void *, AsyncClient *from, void *data, size_t length) {
+      if (brokerSlowMs > 0)
+        vTaskDelay(pdMS_TO_TICKS(brokerSlowMs));
       for (size_t i = 0; i < length; i++)
         brokerTakeByte(from, *connection, ((const uint8_t *)data)[i]);
     });
@@ -464,6 +513,9 @@ static void brokerSendCounts(AsyncWebServerRequest *request)
   }
   if (request->hasParam("forget"))
     brokerTopicCount = 0;
+  if (request->hasParam("slow_ms"))
+    brokerSlowMs = request->getParam("slow_ms")->value().toInt();
+  doc["slow_ms"] = brokerSlowMs;
   String body;
   serializeJson(doc, body);
   request->send(200, "application/json", body);
@@ -535,6 +587,7 @@ void reproRoutes(AsyncWebServer &server)
   server.on("/api/repro/broker/values", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", brokerValues != nullptr && brokerValuesLength > 0 ? brokerValues : "null");
   });
+  server.on("/api/repro/lockwait", HTTP_GET, reproSendLockWait);
   server.on("/api/repro/broker", HTTP_GET, brokerSendCounts);
   brokerBegin();
   heapSamplerBegin();
