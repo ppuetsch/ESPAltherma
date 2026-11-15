@@ -9,6 +9,7 @@
 //    /api/repro/coredump hands out the core dump the panic handler wrote to flash.
 
 #include <Arduino.h>
+#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <esp_attr.h>
@@ -24,7 +25,7 @@
 #define FAKE_UNIT_PAYLOAD_MAX 60
 #define BALLAST_PIECE_BYTES 1024
 #define FAILED_ALLOCATION_MAGIC 0x4F4F4D21u // "OOM!"
-#define FAILED_ALLOCATIONS_KEPT 8
+#define FAILED_ALLOCATIONS_KEPT 24
 
 // ---------------------------------------------------------------------------------------------- the heat pump
 
@@ -219,6 +220,113 @@ static void failedAllocationsToJson(const FailedAllocationLog &log, JsonObject o
   }
 }
 
+// ------------------------------------------------------------------------------------- the broker next door
+
+// The second bare board takes what the first one publishes: enough of MQTT 3.1.1 for PubSubClient (CONNECT,
+// SUBSCRIBE, PINGREQ, QoS 0 PUBLISH). Nothing is forwarded; the bytes are counted for /api/repro/broker.
+#define BROKER_PORT 1883
+#define MQTT_PACKET_CONNECT 1
+#define MQTT_PACKET_PUBLISH 3
+#define MQTT_PACKET_SUBSCRIBE 8
+#define MQTT_PACKET_PINGREQ 12
+
+struct BrokerConnection
+{
+  enum { READ_TYPE, READ_LENGTH, READ_BODY } state = READ_TYPE;
+  uint8_t packetType = 0;
+  uint32_t bodyLength = 0, bodyRead = 0;
+  uint8_t lengthShift = 0;
+  uint8_t packetId[2] = {0, 0};
+};
+
+static AsyncServer brokerServer(BROKER_PORT);
+static volatile uint32_t brokerConnections = 0, brokerPublishes = 0, brokerPublishedBytes = 0, brokerLargestPublish = 0;
+
+static void brokerAnswer(AsyncClient *board, const BrokerConnection &connection)
+{
+  static const char connack[] = {0x20, 0x02, 0x00, 0x00};
+  static const char pingresp[] = {(char)0xD0, 0x00};
+  if (connection.packetType == MQTT_PACKET_CONNECT)
+    board->write(connack, sizeof(connack));
+  else if (connection.packetType == MQTT_PACKET_PINGREQ)
+    board->write(pingresp, sizeof(pingresp));
+  else if (connection.packetType == MQTT_PACKET_SUBSCRIBE)
+  {
+    const char suback[] = {(char)0x90, 0x03, (char)connection.packetId[0], (char)connection.packetId[1], 0x00};
+    board->write(suback, sizeof(suback));
+  }
+  else if (connection.packetType == MQTT_PACKET_PUBLISH)
+  {
+    brokerPublishes++;
+    brokerPublishedBytes += connection.bodyLength;
+    if (connection.bodyLength > brokerLargestPublish)
+      brokerLargestPublish = connection.bodyLength;
+  }
+}
+
+static void brokerPacketEnded(AsyncClient *board, BrokerConnection &connection)
+{
+  brokerAnswer(board, connection);
+  connection.state = BrokerConnection::READ_TYPE;
+}
+
+static void brokerTakeByte(AsyncClient *board, BrokerConnection &connection, uint8_t byte)
+{
+  switch (connection.state)
+  {
+  case BrokerConnection::READ_TYPE:
+    connection.packetType = byte >> 4;
+    connection.bodyLength = connection.bodyRead = 0;
+    connection.lengthShift = 0;
+    connection.state = BrokerConnection::READ_LENGTH;
+    break;
+  case BrokerConnection::READ_LENGTH:
+    connection.bodyLength |= (uint32_t)(byte & 0x7F) << connection.lengthShift;
+    connection.lengthShift += 7;
+    if (byte & 0x80)
+      break;
+    connection.state = BrokerConnection::READ_BODY;
+    if (connection.bodyLength == 0)
+      brokerPacketEnded(board, connection);
+    break;
+  case BrokerConnection::READ_BODY:
+    if (connection.bodyRead < sizeof(connection.packetId))
+      connection.packetId[connection.bodyRead] = byte;
+    if (++connection.bodyRead == connection.bodyLength)
+      brokerPacketEnded(board, connection);
+    break;
+  }
+}
+
+static void brokerBegin()
+{
+  brokerServer.onClient([](void *, AsyncClient *board) {
+    BrokerConnection *connection = new BrokerConnection();
+    brokerConnections++;
+    board->onData([connection](void *, AsyncClient *from, void *data, size_t length) {
+      for (size_t i = 0; i < length; i++)
+        brokerTakeByte(from, *connection, ((const uint8_t *)data)[i]);
+    });
+    board->onDisconnect([connection](void *, AsyncClient *gone) {
+      delete connection;
+      delete gone;
+    });
+  }, nullptr);
+  brokerServer.begin();
+}
+
+static void brokerSendCounts(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  doc["connections"] = brokerConnections;
+  doc["publishes"] = brokerPublishes;
+  doc["published_bytes"] = brokerPublishedBytes;
+  doc["largest_publish"] = brokerLargestPublish;
+  String body;
+  serializeJson(doc, body);
+  request->send(200, "application/json", body);
+}
+
 // ------------------------------------------------------------------------------------------------ the routes
 
 static void reproHeapJson(JsonDocument &doc)
@@ -275,6 +383,8 @@ void reproRoutes(AsyncWebServer &server)
     request->send(200, "text/plain", esp_core_dump_image_erase() == ESP_OK ? "erased" : "nothing erased");
   });
   server.on("/api/repro/coredump", HTTP_GET, reproSendCoreDump);
+  server.on("/api/repro/broker", HTTP_GET, brokerSendCounts);
+  brokerBegin();
 }
 
 #endif
