@@ -266,6 +266,18 @@ static void failedAllocationsToJson(const FailedAllocationLog &log, JsonObject o
 #define MQTT_PACKET_SUBSCRIBE 8
 #define MQTT_PACKET_PINGREQ 12
 
+#define BROKER_TOPICS_KEPT 48
+#define BROKER_TOPIC_MAX 96
+#define FNV_OFFSET 2166136261u
+#define FNV_PRIME 16777619u
+
+// What was last published on a topic: enough to tell whether two firmwares publish the same thing
+struct BrokerTopic
+{
+  char name[BROKER_TOPIC_MAX];
+  uint32_t publishes, payloadLength, payloadHash;
+};
+
 struct BrokerConnection
 {
   enum { READ_TYPE, READ_LENGTH, READ_BODY } state = READ_TYPE;
@@ -273,7 +285,58 @@ struct BrokerConnection
   uint32_t bodyLength = 0, bodyRead = 0;
   uint8_t lengthShift = 0;
   uint8_t packetId[2] = {0, 0};
+  char topic[BROKER_TOPIC_MAX] = "";
+  uint32_t topicLength = 0, payloadHash = FNV_OFFSET;
 };
+
+static BrokerTopic *brokerTopics = nullptr;
+static volatile uint32_t brokerTopicCount = 0;
+
+static void brokerNoteTopic(const BrokerConnection &connection)
+{
+  if (brokerTopics == nullptr)
+    brokerTopics = (BrokerTopic *)calloc(BROKER_TOPICS_KEPT, sizeof(BrokerTopic));
+  if (brokerTopics == nullptr)
+    return;
+  uint32_t slot = 0;
+  while (slot < brokerTopicCount && strcmp(brokerTopics[slot].name, connection.topic) != 0)
+    slot++;
+  if (slot == BROKER_TOPICS_KEPT)
+    return;
+  if (slot == brokerTopicCount)
+  {
+    strlcpy(brokerTopics[slot].name, connection.topic, BROKER_TOPIC_MAX);
+    brokerTopicCount = brokerTopicCount + 1;
+  }
+  brokerTopics[slot].publishes++;
+  brokerTopics[slot].payloadLength = connection.bodyLength - 2 - connection.topicLength;
+  brokerTopics[slot].payloadHash = connection.payloadHash;
+}
+
+// A byte of a PUBLISH body: two bytes of topic length, the topic, then the payload (QoS 0 has no packet id)
+static void brokerTakePublishByte(BrokerConnection &connection, uint8_t byte)
+{
+  uint32_t at = connection.bodyRead;
+  if (at == 0)
+  {
+    connection.topicLength = (uint32_t)byte << 8;
+    connection.payloadHash = FNV_OFFSET;
+    connection.topic[0] = 0;
+  }
+  else if (at == 1)
+    connection.topicLength |= byte;
+  else if (at < 2 + connection.topicLength)
+  {
+    uint32_t index = at - 2;
+    if (index < BROKER_TOPIC_MAX - 1)
+    {
+      connection.topic[index] = (char)byte;
+      connection.topic[index + 1] = 0;
+    }
+  }
+  else
+    connection.payloadHash = (connection.payloadHash ^ byte) * FNV_PRIME;
+}
 
 static AsyncServer brokerServer(BROKER_PORT);
 static volatile uint32_t brokerConnections = 0, brokerPublishes = 0, brokerPublishedBytes = 0, brokerLargestPublish = 0;
@@ -293,6 +356,7 @@ static void brokerAnswer(AsyncClient *board, const BrokerConnection &connection)
   }
   else if (connection.packetType == MQTT_PACKET_PUBLISH)
   {
+    brokerNoteTopic(connection);
     brokerPublishes++;
     brokerPublishedBytes += connection.bodyLength;
     if (connection.bodyLength > brokerLargestPublish)
@@ -328,6 +392,8 @@ static void brokerTakeByte(AsyncClient *board, BrokerConnection &connection, uin
   case BrokerConnection::READ_BODY:
     if (connection.bodyRead < sizeof(connection.packetId))
       connection.packetId[connection.bodyRead] = byte;
+    if (connection.packetType == MQTT_PACKET_PUBLISH)
+      brokerTakePublishByte(connection, byte);
     if (++connection.bodyRead == connection.bodyLength)
       brokerPacketEnded(board, connection);
     break;
@@ -358,6 +424,17 @@ static void brokerSendCounts(AsyncWebServerRequest *request)
   doc["publishes"] = brokerPublishes;
   doc["published_bytes"] = brokerPublishedBytes;
   doc["largest_publish"] = brokerLargestPublish;
+  JsonArray topics = doc["topics"].to<JsonArray>();
+  for (uint32_t i = 0; i < brokerTopicCount; i++)
+  {
+    JsonObject topic = topics.add<JsonObject>();
+    topic["topic"] = (const char *)brokerTopics[i].name;
+    topic["publishes"] = brokerTopics[i].publishes;
+    topic["length"] = brokerTopics[i].payloadLength;
+    topic["hash"] = brokerTopics[i].payloadHash;
+  }
+  if (request->hasParam("forget"))
+    brokerTopicCount = 0;
   String body;
   serializeJson(doc, body);
   request->send(200, "application/json", body);
