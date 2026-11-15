@@ -292,6 +292,19 @@ struct BrokerConnection
 static BrokerTopic *brokerTopics = nullptr;
 static volatile uint32_t brokerTopicCount = 0;
 
+// The last values message (the topic that ends in /ATTR), whole: to compare what two firmwares put in it
+#define BROKER_VALUES_KEPT 12288
+static char *brokerValues = nullptr;
+static volatile uint32_t brokerValuesLength = 0;
+
+static bool brokerIsValuesTopic(const char *topic)
+{
+  size_t length = strlen(topic);
+  return length >= 5 && strcmp(topic + length - 5, "/ATTR") == 0;
+}
+
+static void brokerKeepValuesByte(const BrokerConnection &connection, uint32_t payloadIndex, uint8_t byte);
+
 static void brokerNoteTopic(const BrokerConnection &connection)
 {
   if (brokerTopics == nullptr)
@@ -335,7 +348,23 @@ static void brokerTakePublishByte(BrokerConnection &connection, uint8_t byte)
     }
   }
   else
+  {
     connection.payloadHash = (connection.payloadHash ^ byte) * FNV_PRIME;
+    brokerKeepValuesByte(connection, at - 2 - connection.topicLength, byte);
+  }
+}
+
+static void brokerKeepValuesByte(const BrokerConnection &connection, uint32_t payloadIndex, uint8_t byte)
+{
+  if (!brokerIsValuesTopic(connection.topic))
+    return;
+  if (brokerValues == nullptr)
+    brokerValues = (char *)malloc(BROKER_VALUES_KEPT);
+  if (brokerValues == nullptr || payloadIndex >= BROKER_VALUES_KEPT - 1)
+    return;
+  brokerValues[payloadIndex] = (char)byte;
+  brokerValues[payloadIndex + 1] = 0;
+  brokerValuesLength = payloadIndex + 1;
 }
 
 static AsyncServer brokerServer(BROKER_PORT);
@@ -503,6 +532,9 @@ void reproRoutes(AsyncWebServer &server)
     request->send(200, "text/plain", esp_core_dump_image_erase() == ESP_OK ? "erased" : "nothing erased");
   });
   server.on("/api/repro/coredump", HTTP_GET, reproSendCoreDump);
+  server.on("/api/repro/broker/values", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", brokerValues != nullptr && brokerValuesLength > 0 ? brokerValues : "null");
+  });
   server.on("/api/repro/broker", HTTP_GET, brokerSendCounts);
   brokerBegin();
   heapSamplerBegin();
