@@ -1499,6 +1499,9 @@ static void crashReport()
 void setup()
 {
   heapMark("start");
+#ifdef REPRO_663
+  reproBegin();
+#endif
   restartCauseLoad();
   eventBegin();
   eventAddf("Boot #%u: %s, firmware %s", eventBoot, resetReasonName(), ESPALTHERMA_VERSION);
