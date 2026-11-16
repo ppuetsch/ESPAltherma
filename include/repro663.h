@@ -175,10 +175,13 @@ static void ballastHoldUntilFree(uint32_t wantedFree)
 extern volatile const char *loopStage;
 static volatile uint32_t sampledLowestFree = UINT32_MAX, sampledLowestBlock = 0, sampledLowestAtMs = 0;
 static volatile const char *sampledLowestStage = "";
+// The same, only while the main loop publishes a poll's values
+static volatile uint32_t sampledLowestWhilePublishing = UINT32_MAX;
 
 static void heapSamplerRestart()
 {
   sampledLowestFree = UINT32_MAX;
+  sampledLowestWhilePublishing = UINT32_MAX;
 }
 
 static void heapSamplerTask(void *)
@@ -193,6 +196,10 @@ static void heapSamplerTask(void *)
       sampledLowestStage = loopStage;
       sampledLowestAtMs = millis();
     }
+    const char *stage = (const char *)loopStage;
+    bool publishing = stage != nullptr && strcmp(stage, "publish values") == 0;
+    if (publishing && freeNow < sampledLowestWhilePublishing)
+      sampledLowestWhilePublishing = freeNow;
     vTaskDelay(pdMS_TO_TICKS(HEAP_SAMPLE_EVERY_MS));
   }
 }
@@ -543,6 +550,7 @@ static void reproHeapJson(JsonDocument &doc)
   sampled["block"] = sampledLowestBlock;
   sampled["stage"] = (const char *)sampledLowestStage;
   sampled["at_ms"] = sampledLowestAtMs;
+  sampled["lowest_while_publishing"] = sampledLowestWhilePublishing;
   failedAllocationsToJson(failedAllocations, doc["failed"].to<JsonObject>());
   failedAllocationsToJson(failedAllocationsOfPreviousBoot, doc["failed_previous_boot"].to<JsonObject>());
 }

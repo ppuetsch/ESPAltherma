@@ -73,7 +73,8 @@ def lowest_during_publishes(board: str, polls: int) -> list[Json]:
         wait_for_a_poll(board)
         time.sleep(SETTLE_SECONDS)
         sampled = get_json(board, "/api/repro/heap")["sampled"]
-        results.append({"lowest": sampled["lowest"], "stage": sampled["stage"]})
+        results.append({"lowest": sampled["lowest"], "stage": sampled["stage"],
+                        "lowest_while_publishing": sampled["lowest_while_publishing"]})
     return results
 
 
@@ -87,8 +88,11 @@ def measure(board: str, pages: int, polls: int) -> Json:
     for listener in listeners:
         listener.stopped.set()
     lowest = [sample["lowest"] for sample in samples]
+    while_publishing = [sample["lowest_while_publishing"] for sample in samples]
     return {"pages": pages, "free_at_rest": free_at_rest, "samples": samples,
             "taken_median": free_at_rest - int(statistics.median(lowest)), "taken_most": free_at_rest - min(lowest),
+            "taken_while_publishing_median": free_at_rest - int(statistics.median(while_publishing)),
+            "taken_while_publishing_most": free_at_rest - min(while_publishing),
             "values_events": [listener.values_events for listener in listeners],
             "values_text": listeners[0].last_values_text if listeners else ""}
 
