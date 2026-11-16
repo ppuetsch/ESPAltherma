@@ -38,6 +38,10 @@ struct FakeUnitRegistry
 
 static FakeUnitRegistry *fakeUnitRegistries = nullptr;
 
+// A unit whose software answers one registry shorter than the definition reads it (/api/repro/short?reg=N&by=M)
+static volatile int fakeUnitShortRegistry = -1;
+static volatile uint8_t fakeUnitShortBy = 0;
+
 // What a healthy unit reads for a value of this kind, in the unit of its conversion (-1: left at zero)
 static int fakeUnitPlausibleRaw(const CatalogEntry &entry)
 {
@@ -126,11 +130,14 @@ size_t fakeUnitReply(const uint8_t *query, size_t queryLength, uint8_t *reply)
   if (!registryQuery || fakeUnitRegistries == nullptr || !fakeUnitRegistries[query[2]].answers)
     return fakeUnitNotUnderstood(reply);
   const FakeUnitRegistry &registry = fakeUnitRegistries[query[2]];
+  uint8_t payloadLength = registry.payloadLength;
+  if (query[2] == fakeUnitShortRegistry && fakeUnitShortBy < payloadLength)
+    payloadLength -= fakeUnitShortBy;
   reply[0] = 0x40;
   reply[1] = query[2];
-  reply[2] = registry.payloadLength + 2;
-  memcpy(reply + 3, registry.payload, registry.payloadLength);
-  size_t withoutChecksum = 3 + registry.payloadLength;
+  reply[2] = payloadLength + 2;
+  memcpy(reply + 3, registry.payload, payloadLength);
+  size_t withoutChecksum = 3 + payloadLength;
   reply[withoutChecksum] = fakeUnitChecksum(reply, withoutChecksum);
   return withoutChecksum + 1;
 }
@@ -588,6 +595,13 @@ void reproRoutes(AsyncWebServer &server)
     request->send(200, "application/json", brokerValues != nullptr && brokerValuesLength > 0 ? brokerValues : "null");
   });
   server.on("/api/repro/lockwait", HTTP_GET, reproSendLockWait);
+  server.on("/api/repro/short", HTTP_GET, [](AsyncWebServerRequest *request) {
+    fakeUnitShortRegistry = request->hasParam("reg") ? (int)strtol(request->getParam("reg")->value().c_str(), nullptr, 0) : -1;
+    fakeUnitShortBy = request->hasParam("by") ? request->getParam("by")->value().toInt() : 0;
+    char answer[64];
+    snprintf(answer, sizeof(answer), "{\"reg\":%d,\"by\":%u}", fakeUnitShortRegistry, fakeUnitShortBy);
+    request->send(200, "application/json", answer);
+  });
   server.on("/api/repro/broker", HTTP_GET, brokerSendCounts);
   brokerBegin();
   heapSamplerBegin();
