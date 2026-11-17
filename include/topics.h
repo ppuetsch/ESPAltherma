@@ -58,14 +58,17 @@ struct MqttTopics
   char cool[TOPIC_SIZE], coolState[TOPIC_SIZE]; // the cooling demand relay
   char ctlSet[2][TOPIC_SIZE], ctlState[2][TOPIC_SIZE], ctlAttrs[2][TOPIC_SIZE];
   char limitSet[TOPIC_SIZE], limitState[TOPIC_SIZE], limitAttrs[TOPIC_SIZE], limitOnSet[TOPIC_SIZE], limitOnState[TOPIC_SIZE]; // the power limit
+  char valveSet[TOPIC_SIZE], valveState[TOPIC_SIZE], pumpSet[TOPIC_SIZE], pumpState[TOPIC_SIZE], outputsAttrs[TOPIC_SIZE]; // forced outputs
   // Home Assistant discovery topics and identifiers
   char cfgSensor[TOPIC_CFG_SIZE], cfgSwitch[TOPIC_CFG_SIZE], cfgSg[TOPIC_CFG_SIZE], cfgSafety[TOPIC_CFG_SIZE], cfgCtl[2][TOPIC_CFG_SIZE], cfgRestore[2][TOPIC_CFG_SIZE], cfgDevice[TOPIC_CFG_SIZE];
   char cfgLimit[TOPIC_CFG_SIZE], cfgLimitOn[TOPIC_CFG_SIZE], cfgCool[TOPIC_CFG_SIZE];
+  char cfgValve[TOPIC_CFG_SIZE], cfgPump[TOPIC_CFG_SIZE];
   char deviceId[TOPIC_SIZE], deviceName[TOPIC_ID_SIZE];   // the device of the readings (device-based discovery)
   char relayDeviceId[TOPIC_SIZE], relayDeviceName[TOPIC_SIZE]; // the device of the relays (the legacy entities)
   char ctlUniq[2][TOPIC_SIZE], ctlEntity[2][TOPIC_ID_SIZE];
   char restoreUniq[2][TOPIC_SIZE], restoreEntity[2][TOPIC_ID_SIZE]; // the "restore the unit's curve" buttons
   char limitUniq[TOPIC_SIZE], limitEntity[TOPIC_ID_SIZE], limitOnUniq[TOPIC_SIZE], limitOnEntity[TOPIC_ID_SIZE];
+  char valveUniq[TOPIC_SIZE], valveEntity[TOPIC_ID_SIZE], pumpUniq[TOPIC_SIZE], pumpEntity[TOPIC_ID_SIZE];
   char updateTopic[TOPIC_SIZE], cfgUpdate[TOPIC_CFG_SIZE], updateUniq[TOPIC_SIZE], updateEntity[TOPIC_ID_SIZE]; // the firmware update entity
   char clientId[TOPIC_SIZE];       // the MQTT client id: the broker drops a connection when another one takes its id
 
@@ -126,6 +129,15 @@ struct MqttTopics
     snprintf(limitEntity, sizeof(limitEntity), "number.%s_power_limit", id);
     snprintf(limitOnUniq, sizeof(limitOnUniq), "%s_power_limit_on", id);
     snprintf(limitOnEntity, sizeof(limitOnEntity), "switch.%s_power_limit", id);
+    snprintf(valveSet, sizeof(valveSet), "%s/three_way_valve/set", base);
+    snprintf(valveState, sizeof(valveState), "%s/three_way_valve/state", base);
+    snprintf(pumpSet, sizeof(pumpSet), "%s/pump_speed/set", base);
+    snprintf(pumpState, sizeof(pumpState), "%s/pump_speed/state", base);
+    snprintf(outputsAttrs, sizeof(outputsAttrs), "%s/outputs/attributes", base);
+    snprintf(valveUniq, sizeof(valveUniq), "%s_three_way_valve", id);
+    snprintf(valveEntity, sizeof(valveEntity), "select.%s_three_way_valve", id);
+    snprintf(pumpUniq, sizeof(pumpUniq), "%s_pump_speed", id);
+    snprintf(pumpEntity, sizeof(pumpEntity), "number.%s_pump_speed", id);
     snprintf(updateTopic, sizeof(updateTopic), "%s/update", base);
     snprintf(updateUniq, sizeof(updateUniq), "%s_firmware", id);
     snprintf(updateEntity, sizeof(updateEntity), "update.%s_firmware", id);
@@ -144,6 +156,8 @@ struct MqttTopics
     }
     snprintf(cfgLimit, sizeof(cfgLimit), "homeassistant/number/%s/power_limit/config", seg);
     snprintf(cfgLimitOn, sizeof(cfgLimitOn), "homeassistant/switch/%s/power_limit/config", seg);
+    snprintf(cfgValve, sizeof(cfgValve), "homeassistant/select/%s/three_way_valve/config", seg);
+    snprintf(cfgPump, sizeof(cfgPump), "homeassistant/number/%s/pump_speed/config", seg);
     snprintf(cfgUpdate, sizeof(cfgUpdate), "homeassistant/update/%s/firmware/config", seg);
     snprintf(cfgDevice, sizeof(cfgDevice), "homeassistant/device/%s-mqtt-discovery/config", dev);
     snprintf(deviceId, sizeof(deviceId), "%s-mqtt-discovery", dev);

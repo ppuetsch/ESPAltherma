@@ -91,6 +91,7 @@ struct AppConfig
   char ctlOrigSw[9];  // the hydro board software those curves belong to
   int ctlHeld[2];     // the target each control holds in RAM only (-1: none), written again after a restart
   bool powerLimit;    // the power limit can be set from Home Assistant and the web interface (control.h)
+  bool outputs;       // the three-way valve and the pump can be forced from Home Assistant and the web interface (outputs.h)
   bool statsEnabled;  // energy and cycle statistics (stats.h): heat output, estimated input and COP, the day's counters
   float statsVoltage; // mains voltage for the estimate, used when the unit reports none
   uint8_t statsPhases; // 1 or 3
@@ -181,6 +182,7 @@ void configDefaults(AppConfig &c)
     c.ctlOrig[k][0] = c.ctlOrig[k][1] = c.ctlHeld[k] = -1;
   c.ctlOrigSw[0] = 0;
   c.powerLimit = false;
+  c.outputs = false;
   c.ctlRamOnly = false;
   c.statsEnabled = true;
   c.statsVoltage = 230;
@@ -286,6 +288,7 @@ void configToJson(const AppConfig &c, JsonDocument &doc, bool includeSecrets, bo
   control["lwt_target"] = c.lwtTarget;
   control["ram_only"] = c.ctlRamOnly;
   control["power_limit"] = c.powerLimit;
+  control["outputs"] = c.outputs;
   if (includeRuntime)
   {
     control["orig_dhw_hi"] = c.ctlOrig[0][0];
@@ -439,6 +442,7 @@ void configFromJson(AppConfig &c, JsonVariantConst src, bool includeRuntime = fa
   readNum(src["control"]["lwt_target"], c.lwtTarget);
   readNum(src["control"]["ram_only"], c.ctlRamOnly);
   readNum(src["control"]["power_limit"], c.powerLimit);
+  readNum(src["control"]["outputs"], c.outputs);
   if (includeRuntime)
   {
     readNum(src["control"]["orig_dhw_hi"], c.ctlOrig[0][0]);

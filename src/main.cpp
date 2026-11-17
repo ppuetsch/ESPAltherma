@@ -23,6 +23,7 @@
 #include "comm.h"
 #include "registrypoll.h"
 #include "control.h"
+#include "outputs.h"
 #include "diii_comm.h"
 #include "stats.h"
 #include "survey.h"
@@ -62,6 +63,7 @@ volatile bool surveyInProgress = false; //the survey is being written: readers m
 volatile bool surveyReady = false;
 CurveControl dhwControl, lwtControl;   //experimental hot water and leaving water targets (control.h), heat pump task
 LimitControl limitControl;             //experimental power limit (control.h), heat pump task
+OutputControl outputControl;           //experimental forced three-way valve and pump (outputs.h), heat pump task
 MeterReader unitMeter; // the unit's own energy meter, where the hydro board is mapped for it (control.h)
 DiiiComm diii;                     //read-only DIII E0/63 frames of an HT outdoor unit (diii_comm.h), heat pump task
 static void diiiSleep(unsigned long ms)
@@ -1117,6 +1119,43 @@ static void limitTick()
   }
 }
 
+// The forced three-way valve and pump: identification, the release at start, requests, the end of a hold, the
+// read-back. Heat pump task only.
+static void outputsTick()
+{
+  OutputControl &c = outputControl;
+  // The option switched off with an output forced from here: it is given back to the unit first
+  if (config.protocol != 'I' || busy || (!config.outputs && !c.leaving()))
+  {
+    if (c.status != CONTROL_OFF)
+      c.reset();
+    return;
+  }
+  if (c.exchange == nullptr)
+    c.exchange = x10aExchange;
+  ControlStatus before = c.status;
+  int valve = c.valve, pump = c.pumpSpeed;
+  c.tick(millis());
+  if (c.status != before)
+    mqttSerial.printf("Forced outputs: %s (software %s)\n", controlStatusName(c.status), c.softwareId);
+  bool ended = c.expired;
+  c.expired = false;
+  if (ended)
+  {
+    eventAddf("Forced outputs given back to the unit: no request for %lu min", OUTPUT_HOLD_MS / 60000UL);
+    return;
+  }
+  if (c.valve != valve)
+    eventAddf("Three-way valve: %s", c.valve == VALVE_AUTO ? "left to the unit" : c.valve == VALVE_DHW ? "forced to hot water" : "forced to space heating");
+  if (c.pumpSpeed != pump)
+  {
+    if (c.pumpSpeed > 0)
+      eventAddf("Pump forced on at %d %% of full speed", c.pumpSpeed);
+    else
+      eventAddf("Pump left to the unit");
+  }
+}
+
 // The unit's own energy meter: identification, then a read a minute. Heat pump task only. Not on the HT outdoor
 // unit's controller: no meter there, and the DIII reader owns the quiet time.
 static void meterTick()
@@ -1341,6 +1380,8 @@ void controlLoop()
   controlTick(lwtControl, config.lwtTarget, "Leaving water");
   HP_STAGE("power limit");
   limitTick();
+  HP_STAGE("forced outputs");
+  outputsTick();
   HP_STAGE("unit counters");
   meterTick();
   HP_STAGE("memory read");
@@ -1604,7 +1645,7 @@ void loop()
     LOOP_STAGE("update entity");
     publishUpdateEntity();
   }
-  if ((dhwControl.changed || lwtControl.changed || limitControl.changed) && client.connected())
+  if ((dhwControl.changed || lwtControl.changed || limitControl.changed || outputControl.changed) && client.connected())
   {
     LOOP_STAGE("target controls state");
     if (dhwControl.changed)
@@ -1621,6 +1662,11 @@ void loop()
     {
       limitControl.changed = false;
       publishLimit();
+    }
+    if (outputControl.changed)
+    {
+      outputControl.changed = false;
+      publishOutputs();
     }
   }
   LOOP_STAGE("idle");

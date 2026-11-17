@@ -48,6 +48,7 @@ extern unsigned long lastPollMs;
 extern DetectResult detection;
 extern CurveControl dhwControl, lwtControl;
 extern LimitControl limitControl;
+extern OutputControl outputControl;
 void requestSurvey();
 void valuesLock();
 void valuesUnlock();
@@ -318,6 +319,21 @@ static void limitJson(JsonObject c, const LimitControl &k)
   }
 }
 
+// The forced three-way valve and pump, for the web interface
+static void outputsJson(JsonObject c, const OutputControl &k)
+{
+  c["status"] = controlStatusName(k.status);
+  c["id"] = k.softwareId;
+  if (k.status == CONTROL_READY)
+  {
+    c["valve"] = valveForceName(k.valve);
+    c["pump_speed"] = k.pumpSpeed;
+    c["valve_reported"] = k.reportedValve == VALVE_DHW ? "dhw" : k.reportedValve == VALVE_SPACE ? "space" : "unknown";
+    c["pump_request"] = k.reportedPump;
+    c["hold_min"] = OUTPUT_HOLD_MS / 60000UL;
+  }
+}
+
 static void statusJson(JsonDocument &doc)
 {
   doc["fw"] = ESPALTHERMA_VERSION;
@@ -457,7 +473,7 @@ static void statusJson(JsonDocument &doc)
     st["tz"] = config.statsTz;
     st["voltage_read"] = !isnan(statsVoltageRead());
   }
-  if (config.dhwTarget || config.lwtTarget || config.powerLimit)
+  if (config.dhwTarget || config.lwtTarget || config.powerLimit || config.outputs)
   {
     // Target controls (experimental, control.h)
     JsonObject ctl = doc["control"].to<JsonObject>();
@@ -467,6 +483,8 @@ static void statusJson(JsonDocument &doc)
       controlJson(ctl["lwt"].to<JsonObject>(), lwtControl);
     if (config.powerLimit)
       limitJson(ctl["limit"].to<JsonObject>(), limitControl);
+    if (config.outputs)
+      outputsJson(ctl["outputs"].to<JsonObject>(), outputControl);
   }
 #ifdef HAS_POWER_MONITOR
   JsonObject pw = doc["power"].to<JsonObject>();
@@ -960,6 +978,30 @@ void webBegin()
         }
         limitControl.request(v);
       }
+      sendOk(r);
+      return;
+    }
+    // The forced outputs: {"valve": "auto" | "space" | "dhw"} and/or {"pump_speed": 55} (0 leaves the pump to the unit)
+    if (doc["valve"].is<const char *>() || doc["pump_speed"].is<int>())
+    {
+      if (!config.outputs || outputControl.status != CONTROL_READY)
+      {
+        r->send(409, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
+        return;
+      }
+      int valve = doc["valve"].is<const char *>() ? valveForceParse(doc["valve"].as<const char *>()) : OUTPUT_NO_REQUEST;
+      int speed = doc["pump_speed"].is<int>() ? doc["pump_speed"].as<int>() : OUTPUT_NO_REQUEST;
+      bool valveBad = doc["valve"].is<const char *>() && valve == OUTPUT_NO_REQUEST;
+      bool speedBad = speed != OUTPUT_NO_REQUEST && (speed < 0 || speed > OUTPUT_PUMP_SPEED_MAX || (speed > 0 && speed < OUTPUT_PUMP_SPEED_MIN));
+      if (valveBad || speedBad)
+      {
+        r->send(400, "application/json", "{\"ok\":false,\"error\":\"out of range\"}");
+        return;
+      }
+      if (valve != OUTPUT_NO_REQUEST)
+        outputControl.requestValve(valve);
+      if (speed != OUTPUT_NO_REQUEST)
+        outputControl.requestPump(speed);
       sendOk(r);
       return;
     }

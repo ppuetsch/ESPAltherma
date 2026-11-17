@@ -36,7 +36,9 @@ Client *mqttNet = &plainClient; // the network client under PubSubClient
 extern Converter converter;
 extern CurveControl dhwControl, lwtControl;
 extern LimitControl limitControl;
+extern OutputControl outputControl;
 static bool limitDiscoveryOn = false;   // the power limit entities are in Home Assistant
+static bool outputsDiscoveryOn = false; // the three-way valve and pump entities are in Home Assistant
 static bool updateDiscoveryOn = false;  // the firmware update entity is in Home Assistant
 static LimitKind limitDiscoveryKind = LIMIT_POWER;
 
@@ -227,12 +229,12 @@ void mqttRetireDiscovery()
   const char *cfgs[] = {mqttTopics.cfgSensor, mqttTopics.cfgSwitch, mqttTopics.cfgSg, mqttTopics.cfgSafety,
                         mqttTopics.cfgCtl[0], mqttTopics.cfgCtl[1], mqttTopics.cfgRestore[0], mqttTopics.cfgRestore[1],
                         mqttTopics.cfgLimit, mqttTopics.cfgLimitOn, mqttTopics.cfgUpdate, mqttTopics.cfgDevice,
-                        mqttTopics.cfgCool};
+                        mqttTopics.cfgCool, mqttTopics.cfgValve, mqttTopics.cfgPump};
   for (const char *t : cfgs)
     client.publish(t, "", true);
   const char *states[] = {mqttTopics.ctlState[0], mqttTopics.ctlState[1], mqttTopics.ctlAttrs[0], mqttTopics.ctlAttrs[1],
                           mqttTopics.state, mqttTopics.safetyState, mqttTopics.detect, mqttTopics.updateTopic,
-                          mqttTopics.coolState};
+                          mqttTopics.coolState, mqttTopics.valveState, mqttTopics.pumpState, mqttTopics.outputsAttrs};
   for (const char *t : states)
     client.publish(t, "", true);
   client.publish(mqttTopics.lwt, "Offline", true);
@@ -397,6 +399,13 @@ bool mqttConnectOnce()
       {
         client.subscribe(mqttTopics.limitSet);
         client.subscribe(mqttTopics.limitOnSet);
+      }
+      outputsDiscoveryOn = false;
+      outputControl.changed = true;
+      if (config.outputs)
+      {
+        client.subscribe(mqttTopics.valveSet);
+        client.subscribe(mqttTopics.pumpSet);
       }
       else
       {
@@ -631,6 +640,36 @@ void callbackLimit(byte *payload, unsigned int length, bool onOff)
   limitControl.request(value);
 }
 
+// The forced outputs requested over MQTT: "auto", "space" or "dhw" for the three-way valve; a speed in % for the
+// pump, 0 to leave it to the unit. Applied by the heat pump task.
+void callbackOutputs(byte *payload, unsigned int length, bool pump)
+{
+  payload[length] = '\0';
+  const char *text = (const char *)payload;
+  if (outputControl.status != CONTROL_READY)
+  {
+    mqttSerial.printf("Forced outputs: not available (%s)\n", controlStatusName(outputControl.status));
+    return;
+  }
+  if (!pump)
+  {
+    int v = valveForceParse(text);
+    if (v == OUTPUT_NO_REQUEST)
+      mqttSerial.printf("Three-way valve: ignored '%s'\n", text);
+    else
+      outputControl.requestValve(v);
+    return;
+  }
+  char *end = nullptr;
+  long speed = strtol(text, &end, 10);
+  if (end == text || speed < 0 || speed > OUTPUT_PUMP_SPEED_MAX || (speed > 0 && speed < OUTPUT_PUMP_SPEED_MIN))
+  {
+    mqttSerial.printf("Pump speed: ignored '%s'\n", text);
+    return;
+  }
+  outputControl.requestPump((int)speed);
+}
+
 // A target requested over MQTT: a whole number of degrees, applied by the heat pump task.
 void callbackControl(CurveControl &c, byte *payload, unsigned int length)
 {
@@ -811,6 +850,53 @@ void publishLimit()
   }
 }
 
+// The forced outputs: a select for the three-way valve (auto, space heating, hot water) and a number for the pump
+// (0 = left to the unit), created when the control is ready, removed when it is not. Main loop only.
+void publishOutputs()
+{
+  OutputControl &c = outputControl;
+  bool ready = config.outputs && c.status == CONTROL_READY;
+  if (ready && !outputsDiscoveryOn)
+  {
+    auto &json = mqttDiscoveryJson; // 470 to 650 bytes
+    int jsonLen = snprintf(json, sizeof(json),
+             "{\"name\":\"Three-way valve\",\"uniq_id\":\"%s\",\"def_ent_id\":\"%s\",\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"json_attr_t\":\"%s\","
+             "\"options\":[\"auto\",\"space\",\"dhw\"],\"avty_t\":\"%s\",\"pl_avail\":\"Online\",\"pl_not_avail\":\"Offline\",\"icon\":\"mdi:valve\","
+             "\"dev\":{\"ids\":\"%s\",\"name\":\"%s\"}}",
+             mqttTopics.valveUniq, mqttTopics.valveEntity, mqttTopics.valveSet, mqttTopics.valveState, mqttTopics.outputsAttrs,
+             mqttTopics.lwt, mqttTopics.deviceId, mqttTopics.deviceName);
+    if (discoveryFits(jsonLen, sizeof(json), "the three-way valve"))
+      mqttPublish(mqttTopics.cfgValve, json, true);
+    jsonLen = snprintf(json, sizeof(json),
+             "{\"name\":\"Pump speed (forced)\",\"uniq_id\":\"%s\",\"def_ent_id\":\"%s\",\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"json_attr_t\":\"%s\","
+             "\"avty_t\":\"%s\",\"pl_avail\":\"Online\",\"pl_not_avail\":\"Offline\","
+             "\"min\":0,\"max\":%d,\"step\":5,\"unit_of_meas\":\"%%\",\"mode\":\"box\",\"icon\":\"mdi:pump\","
+             "\"dev\":{\"ids\":\"%s\",\"name\":\"%s\"}}",
+             mqttTopics.pumpUniq, mqttTopics.pumpEntity, mqttTopics.pumpSet, mqttTopics.pumpState, mqttTopics.outputsAttrs,
+             mqttTopics.lwt, OUTPUT_PUMP_SPEED_MAX, mqttTopics.deviceId, mqttTopics.deviceName);
+    if (discoveryFits(jsonLen, sizeof(json), "the pump speed"))
+      mqttPublish(mqttTopics.cfgPump, json, true);
+    outputsDiscoveryOn = true;
+  }
+  else if (outputsDiscoveryOn && (!config.outputs || c.status == CONTROL_UNSUPPORTED))
+  {
+    mqttPublish(mqttTopics.cfgValve, "", true);
+    mqttPublish(mqttTopics.cfgPump, "", true);
+    outputsDiscoveryOn = false;
+  }
+  if (ready)
+  {
+    char value[8], attrs[96];
+    mqttPublish(mqttTopics.valveState, valveForceName(c.valve), true);
+    snprintf(value, sizeof(value), "%d", c.pumpSpeed);
+    mqttPublish(mqttTopics.pumpState, value, true);
+    snprintf(attrs, sizeof(attrs), "{\"valve\":\"%s\",\"pump_request\":%d,\"forcing\":%s}",
+             c.reportedValve == VALVE_DHW ? "dhw" : c.reportedValve == VALVE_SPACE ? "space" : "unknown", c.reportedPump,
+             c.forcing() ? "true" : "false");
+    mqttPublish(mqttTopics.outputsAttrs, attrs, true);
+  }
+}
+
 void callback(char *topic, byte *payload, unsigned int length)
 {
   // the payload is not terminated yet, its handlers do it (#598); mqttSerial only queues the line
@@ -856,6 +942,14 @@ void callback(char *topic, byte *payload, unsigned int length)
   else if (config.powerLimit && strcmp(topic, mqttTopics.limitOnSet) == 0)
   {
     callbackLimit(payload, length, true);
+  }
+  else if (config.outputs && strcmp(topic, mqttTopics.valveSet) == 0)
+  {
+    callbackOutputs(payload, length, false);
+  }
+  else if (config.outputs && strcmp(topic, mqttTopics.pumpSet) == 0)
+  {
+    callbackOutputs(payload, length, true);
   }
 
   else
